@@ -1,0 +1,836 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OI Tracker - NIFTY & SENSEX</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/bootstrap-icons.css">
+    <style>
+        :root {
+            --primary-gradient: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            --success-gradient: linear-gradient(135deg, #11998e 0%, #38ef7d 100%);
+            --danger-gradient: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+            --dark-bg: #0f0f23;
+            --card-bg: rgba(255, 255, 255, 0.05);
+            --card-border: rgba(255, 255, 255, 0.1);
+            --text-primary: #ffffff;
+            --text-secondary: #a0aec0;
+            --itm-color: #48bb78;
+            --atm-color: #38b2ac;
+            --otm-color: #f56565;
+            --highlight-color: #fc8181;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            background: var(--dark-bg);
+            background-image: 
+                radial-gradient(at 40% 20%, hsla(240, 80%, 30%, 0.4) 0px, transparent 50%),
+                radial-gradient(at 80% 0%, hsla(280, 80%, 30%, 0.4) 0px, transparent 50%);
+            min-height: 100vh;
+            color: var(--text-primary);
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            overflow: hidden;
+        }
+
+        .container-fluid {
+            padding: 0;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Compact Tab Navigation */
+        .nav-tabs {
+            border-bottom: 2px solid var(--card-border);
+            background: var(--card-bg);
+            padding: 0;
+            margin: 0;
+            min-height: 50px;
+        }
+
+        .nav-tabs .nav-link {
+            color: var(--text-secondary);
+            border: none;
+            padding: 8px 20px;
+            font-weight: 600;
+            font-size: 1rem;
+            transition: all 0.3s;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .nav-tabs .nav-link:hover {
+            color: var(--text-primary);
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .nav-tabs .nav-link.active {
+            color: var(--text-primary);
+            background: var(--primary-gradient);
+            border: none;
+        }
+
+        /* Compact Info Bar */
+        .info-bar {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 5px 15px;
+            background: var(--card-bg);
+            border-bottom: 1px solid var(--card-border);
+            min-height: 40px;
+        }
+
+        .info-bar .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 3px 10px;
+            border-radius: 20px;
+            font-size: 0.75rem;
+            font-weight: 600;
+        }
+
+        .status-live {
+            background: var(--success-gradient);
+            animation: pulse 2s infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .info-group {
+            display: flex;
+            gap: 15px;
+            align-items: center;
+            flex-wrap: wrap;
+        }
+
+        .info-item {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        .info-item .label {
+            color: var(--text-secondary);
+            font-size: 0.65rem;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .info-item .value {
+            font-size: 0.9rem;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        /* Tab Content - Full Height */
+        .tab-content {
+            flex: 1;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        .tab-pane {
+            height: 100%;
+            display: none;
+            flex-direction: column;
+        }
+
+        .tab-pane.active {
+            display: flex;
+        }
+
+        /* Table Container - Full Height */
+        .table-container {
+            flex: 1;
+            background: var(--card-bg);
+            backdrop-filter: blur(10px);
+            border: 1px solid var(--card-border);
+            margin: 5px;
+            border-radius: 8px;
+            overflow-y: auto;
+            overflow-x: auto;
+            padding: 8px;
+        }
+
+        .data-table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+        }
+
+        .data-table th {
+            background: rgba(255, 255, 255, 0.1);
+            color: var(--text-secondary);
+            font-weight: 600;
+            text-transform: uppercase;
+            font-size: 0.65rem;
+            padding: 6px 4px;
+            text-align: right;
+            border-bottom: 2px solid rgba(255, 255, 255, 0.1);
+            position: sticky;
+            top: 0;
+            z-index: 10;
+        }
+
+        .data-table td {
+            padding: 5px 4px;
+            text-align: right;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+            font-size: 0.8rem;
+            font-weight: 600;
+        }
+
+        .data-table tr:hover {
+            background: rgba(255, 255, 255, 0.05);
+        }
+
+        .data-table tr.atm-row {
+            background: rgba(56, 178, 172, 0.3) !important;
+            font-weight: 700 !important;
+            border-top: 2px solid rgba(56, 178, 172, 0.8) !important;
+            border-bottom: 2px solid rgba(56, 178, 172, 0.8) !important;
+            box-shadow: 0 0 15px rgba(56, 178, 172, 0.3);
+        }
+        
+        .data-table tr.atm-row:hover {
+            background: rgba(56, 178, 172, 0.4) !important;
+        }
+        
+        .data-table tr.atm-row td {
+            border-top: 2px solid rgba(56, 178, 172, 0.8);
+            border-bottom: 2px solid rgba(56, 178, 172, 0.8);
+        }
+
+        .strike-column {
+            background: rgba(255, 255, 255, 0.08);
+            font-weight: 700;
+            text-align: center !important;
+            border-left: 2px solid rgba(255, 255, 255, 0.2);
+            border-right: 2px solid rgba(255, 255, 255, 0.2);
+        }
+
+        .strike-itm { color: var(--itm-color); }
+        .strike-atm { color: var(--atm-color); font-size: 1.1em; }
+        .strike-otm { color: var(--otm-color); }
+
+        .pct-change {
+            padding: 2px 6px;
+            border-radius: 3px;
+            display: inline-block;
+            min-width: 50px;
+            font-size: 0.75rem;
+        }
+
+        .pct-positive { color: var(--itm-color); }
+        .pct-negative { color: var(--otm-color); }
+        .pct-highlight {
+            background: rgba(252, 129, 129, 0.2);
+            border: 1px solid var(--highlight-color);
+            animation: blink 1s infinite;
+        }
+
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.7; }
+        }
+
+        .price-clickable {
+            cursor: pointer;
+            color: #4FC3F7;
+            font-weight: 700;
+            transition: all 0.2s;
+        }
+
+        .price-clickable:hover {
+            color: #FFD700;
+            text-decoration: underline;
+            transform: scale(1.05);
+        }
+
+        /* Compact Positions Container */
+        .positions-container {
+            background: var(--card-bg);
+            border-top: 1px solid var(--card-border);
+            padding: 8px;
+            max-height: 180px;
+            overflow-y: auto;
+        }
+
+        .positions-header {
+            font-size: 0.85rem;
+            font-weight: 600;
+            margin-bottom: 5px;
+            color: var(--text-primary);
+        }
+
+        .positions-table {
+            width: 100%;
+            font-size: 0.75rem;
+            border-collapse: collapse;
+        }
+
+        .positions-table th {
+            padding: 5px 8px;
+            text-align: left;
+            color: var(--text-secondary);
+            font-size: 0.7rem;
+            text-transform: uppercase;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .positions-table td {
+            padding: 6px 8px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+        }
+
+        .type-badge {
+            padding: 2px 8px;
+            border-radius: 3px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+
+        .type-badge.buy {
+            background: rgba(33, 150, 243, 0.2);
+            color: #42a5f5;
+        }
+
+        .type-badge.sell {
+            background: rgba(255, 107, 107, 0.2);
+            color: #ff6b6b;
+        }
+
+        .mtm-value {
+            font-weight: 700;
+            font-size: 0.85rem;
+        }
+
+        .mtm-value.positive { color: #38ef7d; }
+        .mtm-value.negative { color: #ef5350; }
+
+        /* Modal */
+        .modal {
+            position: fixed;
+            z-index: 10000;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            backdrop-filter: blur(5px);
+        }
+
+        .modal-content {
+            background: var(--card-bg);
+            backdrop-filter: blur(10px);
+            margin: 10% auto;
+            padding: 25px;
+            border: 2px solid var(--card-border);
+            border-radius: 12px;
+            width: 380px;
+            max-width: 90%;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+        }
+
+        .close-modal {
+            color: #aaa;
+            float: right;
+            font-size: 24px;
+            font-weight: bold;
+            cursor: pointer;
+            line-height: 20px;
+        }
+
+        .close-modal:hover { color: #fff; }
+
+        .loading {
+            text-align: center;
+            padding: 30px;
+            color: var(--text-secondary);
+        }
+
+        .spinner {
+            border: 3px solid rgba(255, 255, 255, 0.1);
+            border-radius: 50%;
+            border-top: 3px solid var(--text-primary);
+            width: 35px;
+            height: 35px;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 15px;
+        }
+
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+    </style>
+</head>
+<body>
+    <div class="container-fluid">
+        <!-- Compact Exchange Tabs -->
+        <ul class="nav nav-tabs" id="exchangeTabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="nse-tab" data-bs-toggle="tab" data-bs-target="#nse-content" 
+                        type="button" role="tab" onclick="switchExchange('NSE')">
+                    <i class="bi bi-bar-chart-fill"></i> NIFTY (NSE)
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="bse-tab" data-bs-toggle="tab" data-bs-target="#bse-content" 
+                        type="button" role="tab" onclick="switchExchange('BSE')">
+                    <i class="bi bi-graph-up"></i> SENSEX (BSE)
+                </button>
+            </li>
+        </ul>
+
+        <!-- Tab Content -->
+        <div class="tab-content" id="exchangeTabContent">
+            <!-- NSE Tab -->
+            <div class="tab-pane fade show active" id="nse-content" role="tabpanel">
+                <!-- Compact Info Bar -->
+                <div class="info-bar">
+                    <span class="status-badge status-live" id="statusBadgeNSE">
+                        <i class="bi bi-circle-fill"></i>
+                        <span id="statusTextNSE">Live</span>
+                    </span>
+                    <div class="info-group">
+                        <div class="info-item">
+                            <div class="label">NIFTY</div>
+                            <div class="value" id="niftyPrice">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">ATM</div>
+                            <div class="value" id="atmStrikeNSE">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">PCR</div>
+                            <div class="value" id="pcrNSE">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">MTM</div>
+                            <div class="value" id="mtmNSE">₹0</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">P&L</div>
+                            <div class="value" id="pnlNSE">₹0</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">Updated</div>
+                            <div class="value" id="lastUpdateNSE">--:--</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Option Chain Table -->
+                <div class="table-container">
+                    <div id="optionChainNSE">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <p>Loading NIFTY option chain...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Compact Positions -->
+                <div class="positions-container">
+                    <div class="positions-header">
+                        <i class="bi bi-briefcase-fill"></i> Open Positions
+                    </div>
+                    <div id="positionsNSE">
+                        <div style="text-align: center; color: var(--text-secondary); padding: 15px; font-size: 0.8rem;">
+                            No positions. Click price to trade.
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- BSE Tab -->
+            <div class="tab-pane fade" id="bse-content" role="tabpanel">
+                <!-- Compact Info Bar -->
+                <div class="info-bar">
+                    <span class="status-badge status-live" id="statusBadgeBSE">
+                        <i class="bi bi-circle-fill"></i>
+                        <span id="statusTextBSE">Live</span>
+                    </span>
+                    <div class="info-group">
+                        <div class="info-item">
+                            <div class="label">SENSEX</div>
+                            <div class="value" id="sensexPrice">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">ATM</div>
+                            <div class="value" id="atmStrikeBSE">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">PCR</div>
+                            <div class="value" id="pcrBSE">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">MTM</div>
+                            <div class="value" id="mtmBSE">₹0</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">P&L</div>
+                            <div class="value" id="pnlBSE">₹0</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">Updated</div>
+                            <div class="value" id="lastUpdateBSE">--:--</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Option Chain Table -->
+                <div class="table-container">
+                    <div id="optionChainBSE">
+                        <div class="loading">
+                            <div class="spinner"></div>
+                            <p>Loading SENSEX option chain...</p>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- Compact Positions -->
+                <div class="positions-container">
+                    <div class="positions-header">
+                        <i class="bi bi-briefcase-fill"></i> Open Positions
+                    </div>
+                    <div id="positionsBSE">
+                        <div style="text-align: center; color: var(--text-secondary); padding: 15px; font-size: 0.8rem;">
+                            No positions. Click price to trade.
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Order Modal -->
+    <div id="orderModal" class="modal" style="display: none;">
+        <div class="modal-content">
+            <span class="close-modal" onclick="closeOrderModal()">&times;</span>
+            <h2 style="color: var(--text-primary); margin-bottom: 15px; font-size: 1.2rem;">Paper Trade Order</h2>
+            
+            <div style="margin-bottom: 12px; font-size: 0.9rem;">
+                <strong>Exchange:</strong> <span id="modalExchange"></span><br>
+                <strong>Symbol:</strong> <span id="modalSymbol"></span><br>
+                <strong>Type:</strong> <span id="modalType"></span><br>
+                <strong>Price:</strong> ₹<span id="modalPrice"></span>
+            </div>
+            
+            <div style="margin-bottom: 15px;">
+                <label style="display: block; margin-bottom: 5px; font-size: 0.9rem;">Quantity:</label>
+                <input type="number" id="modalQty" value="300" min="1" style="width: 100%; padding: 8px; border-radius: 5px; border: 1px solid #ccc; font-size: 0.9rem;">
+            </div>
+            
+            <div style="display: flex; gap: 10px;">
+                <button onclick="placeOrder('B')" style="flex: 1; padding: 10px; background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 0.9rem;">
+                    <i class="bi bi-arrow-up-circle"></i> BUY
+                </button>
+                <button onclick="placeOrder('S')" style="flex: 1; padding: 10px; background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%); color: white; border: none; border-radius: 5px; font-weight: bold; cursor: pointer; font-size: 0.9rem;">
+                    <i class="bi bi-arrow-down-circle"></i> SELL
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Scripts -->
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script>
+        const socket = io();
+        const intervals = {{ intervals | tojson }};
+        const thresholds = {{ thresholds | tojson }};
+
+        let currentExchange = 'NSE';
+        let exchangeData = { 'NSE': {}, 'BSE': {} };
+
+        function switchExchange(exchange) {
+            currentExchange = exchange;
+            console.log('Switched to:', exchange);
+        }
+
+        socket.on('connect', function() {
+            console.log('Connected to server');
+        });
+
+        socket.on('disconnect', function() {
+            console.log('Disconnected from server');
+        });
+
+        socket.on('data_update_NSE', function(data) {
+            exchangeData['NSE'] = data;
+            if (currentExchange === 'NSE') {
+                updateUI(data, 'NSE');
+            }
+        });
+
+        socket.on('data_update_BSE', function(data) {
+            exchangeData['BSE'] = data;
+            if (currentExchange === 'BSE') {
+                updateUI(data, 'BSE');
+            }
+        });
+
+        socket.on('position_closed', function(data) {
+            const exchange = data.exchange;
+            const realized_pnl = data.realized_pnl || 0;
+            const pnlText = realized_pnl >= 0 ? `Profit: ₹${realized_pnl.toFixed(2)}` : `Loss: ₹${Math.abs(realized_pnl).toFixed(2)}`;
+            alert(`[${exchange}] Position Closed!\n${data.exit_reason}\nExit Price: ₹${data.exit_price}\n${pnlText}`);
+        });
+
+        function updateUI(data, exchange) {
+            const suffix = exchange;
+            
+            const statusText = document.getElementById(`statusText${suffix}`);
+            if (statusText) {
+                statusText.textContent = data.status === 'Live' ? 'Live' : 'Error';
+            }
+            
+            if (data.atm_strike) {
+                document.getElementById(`atmStrike${suffix}`).textContent = data.atm_strike;
+            }
+            
+            if (data.underlying_price) {
+                const priceId = exchange === 'NSE' ? 'niftyPrice' : 'sensexPrice';
+                document.getElementById(priceId).textContent = data.underlying_price;
+            }
+            
+            if (data.pcr != null) {
+                document.getElementById(`pcr${suffix}`).textContent = data.pcr;
+            }
+            
+            if (data.total_mtm != null) {
+                const mtmEl = document.getElementById(`mtm${suffix}`);
+                const mtm = data.total_mtm;
+                mtmEl.textContent = '₹' + Math.round(mtm);
+                mtmEl.style.color = mtm >= 0 ? '#38ef7d' : '#f45c43';
+            }
+            
+            if (data.closed_pnl != null) {
+                const pnlEl = document.getElementById(`pnl${suffix}`);
+                const pnl = data.closed_pnl;
+                pnlEl.textContent = '₹' + Math.round(pnl);
+                pnlEl.style.color = pnl >= 0 ? '#38ef7d' : '#f45c43';
+            }
+            
+            if (data.last_update) {
+                document.getElementById(`lastUpdate${suffix}`).textContent = data.last_update;
+            }
+            
+            if (data.call_options && data.put_options) {
+                updateOptionChain(data.call_options, data.put_options, exchange);
+            }
+            
+            if (data.open_positions !== undefined) {
+                updateOpenPositions(data.open_positions, exchange);
+            }
+        }
+
+        function updateOptionChain(callOptions, putOptions, exchange) {
+            const containerId = `optionChain${exchange}`;
+            const container = document.getElementById(containerId);
+            
+            if (!callOptions || callOptions.length === 0) {
+                container.innerHTML = '<div class="loading"><p>No data</p></div>';
+                return;
+            }
+            
+            let html = '<table class="data-table"><thead><tr>';
+            
+            const reversedIntervals = [...intervals].reverse();
+            reversedIntervals.forEach(interval => {
+                html += `<th>OI %Chg<br>(${interval}m)</th>`;
+            });
+            html += '<th>OI</th>';
+            html += '<th>Price</th>';
+            html += '<th class="strike-column">STRIKE</th>';
+            html += '<th>Price</th>';
+            html += '<th>OI</th>';
+            intervals.forEach(interval => {
+                html += `<th>OI %Chg<br>(${interval}m)</th>`;
+            });
+            
+            html += '</tr></thead><tbody>';
+            
+            callOptions.forEach((callOpt, index) => {
+                const putOpt = putOptions[index] || {};
+                const rowClass = callOpt.strike_type === 'atm' ? ' atm-row' : '';
+                html += `<tr class="${rowClass}">`;
+                
+                reversedIntervals.forEach(interval => {
+                    const pctChange = callOpt.pct_changes ? callOpt.pct_changes[`${interval}m`] : null;
+                    html += '<td>';
+                    if (pctChange != null) {
+                        const pctValue = pctChange.toFixed(1);
+                        const pctClass = pctChange >= 0 ? 'pct-positive' : 'pct-negative';
+                        const threshold = thresholds[interval];
+                        const isHighlight = Math.abs(pctChange) > threshold;
+                        const highlightClass = isHighlight ? ' pct-highlight' : '';
+                        html += `<span class="pct-change ${pctClass}${highlightClass}">${pctValue > 0 ? '+' : ''}${pctValue}%</span>`;
+                    } else {
+                        html += '<span class="pct-change">N/A</span>';
+                    }
+                    html += '</td>';
+                });
+                
+                html += `<td>${callOpt.latest_oi != null ? formatNumber(callOpt.latest_oi) : 'N/A'}</td>`;
+                
+                const callPrice = callOpt.ltp != null ? callOpt.ltp.toFixed(1) : 'N/A';
+                if (callPrice !== 'N/A') {
+                    html += `<td class="price-clickable" onclick="showOrderModal('${callOpt.symbol}', 'CE', ${callOpt.ltp}, '${exchange}')">${callPrice}</td>`;
+                } else {
+                    html += `<td>${callPrice}</td>`;
+                }
+                
+                const strikeClass = `strike-${callOpt.strike_type}`;
+                html += `<td class="strike-column ${strikeClass}">${callOpt.strike}</td>`;
+                
+                const putPrice = putOpt.ltp != null ? putOpt.ltp.toFixed(1) : 'N/A';
+                if (putPrice !== 'N/A') {
+                    html += `<td class="price-clickable" onclick="showOrderModal('${putOpt.symbol}', 'PE', ${putOpt.ltp}, '${exchange}')">${putPrice}</td>`;
+                } else {
+                    html += `<td>${putPrice}</td>`;
+                }
+                
+                html += `<td>${putOpt.latest_oi != null ? formatNumber(putOpt.latest_oi) : 'N/A'}</td>`;
+                
+                intervals.forEach(interval => {
+                    const pctChange = putOpt.pct_changes ? putOpt.pct_changes[`${interval}m`] : null;
+                    html += '<td>';
+                    if (pctChange != null) {
+                        const pctValue = pctChange.toFixed(1);
+                        const pctClass = pctChange >= 0 ? 'pct-positive' : 'pct-negative';
+                        const threshold = thresholds[interval];
+                        const isHighlight = Math.abs(pctChange) > threshold;
+                        const highlightClass = isHighlight ? ' pct-highlight' : '';
+                        html += `<span class="pct-change ${pctClass}${highlightClass}">${pctValue > 0 ? '+' : ''}${pctValue}%</span>`;
+                    } else {
+                        html += '<span class="pct-change">N/A</span>';
+                    }
+                    html += '</td>';
+                });
+                
+                html += '</tr>';
+            });
+            
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        function updateOpenPositions(positions, exchange) {
+            const container = document.getElementById(`positions${exchange}`);
+            
+            if (!positions || positions.length === 0) {
+                container.innerHTML = '<div style="text-align: center; color: var(--text-secondary); padding: 15px; font-size: 0.8rem;">No positions. Click price to trade.</div>';
+                return;
+            }
+            
+            let html = '<table class="positions-table"><thead><tr>';
+            html += '<th>Symbol</th><th>Type</th><th>Qty</th><th>Entry</th><th>Current</th><th>MTM</th><th>Time</th>';
+            html += '</tr></thead><tbody>';
+            
+            positions.forEach(pos => {
+                const sideClass = pos.side === 'B' ? 'buy' : 'sell';
+                const sideText = pos.side === 'B' ? 'BUY' : 'SELL';
+                const mtm = pos.mtm || 0;
+                const mtmClass = mtm >= 0 ? 'positive' : 'negative';
+                
+                html += '<tr>';
+                html += `<td style="font-size: 0.7rem;">${pos.symbol}</td>`;
+                html += `<td><span class="type-badge ${sideClass}">${sideText}</span></td>`;
+                html += `<td>${pos.qty}</td>`;
+                html += `<td>₹${pos.entry_price.toFixed(1)}</td>`;
+                html += `<td>₹${pos.current_price.toFixed(1)}</td>`;
+                html += `<td><span class="mtm-value ${mtmClass}">₹${Math.round(mtm)}</span></td>`;
+                html += `<td style="font-size: 0.7rem;">${pos.entry_time}</td>`;
+                html += '</tr>';
+            });
+            
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        }
+
+        function formatNumber(num) {
+            return num.toLocaleString('en-IN');
+        }
+
+        let currentOrderData = {};
+
+        function showOrderModal(symbol, type, price, exchange) {
+            currentOrderData = { symbol, type, price, exchange };
+            document.getElementById('modalExchange').textContent = exchange;
+            document.getElementById('modalSymbol').textContent = symbol;
+            document.getElementById('modalType').textContent = type;
+            document.getElementById('modalPrice').textContent = price.toFixed(1);
+            document.getElementById('modalQty').value = 300;
+            document.getElementById('orderModal').style.display = 'block';
+        }
+
+        function closeOrderModal() {
+            document.getElementById('orderModal').style.display = 'none';
+        }
+
+        async function placeOrder(side) {
+            const qty = parseInt(document.getElementById('modalQty').value);
+            
+            if (qty <= 0 || isNaN(qty)) {
+                alert('Please enter valid quantity');
+                return;
+            }
+
+            const orderData = {
+                exchange: currentOrderData.exchange,
+                symbol: currentOrderData.symbol,
+                type: currentOrderData.type,
+                side: side,
+                price: currentOrderData.price,
+                qty: qty
+            };
+
+            try {
+                const response = await fetch('/api/place_order', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(orderData)
+                });
+
+                const result = await response.json();
+                
+                if (result.success) {
+                    const sideText = side === 'B' ? 'BUY' : 'SELL';
+                    alert(`✓ ${sideText} order placed!\n${orderData.exchange}: ${result.position_id}`);
+                    closeOrderModal();
+                } else {
+                    alert('Error: ' + result.error);
+                }
+            } catch (error) {
+                console.error('Error placing order:', error);
+                alert('Error placing order.');
+            }
+        }
+
+        window.onclick = function(event) {
+            const modal = document.getElementById('orderModal');
+            if (event.target == modal) {
+                closeOrderModal();
+            }
+        }
+    </script>
+</body>
+</html>
