@@ -339,14 +339,20 @@ class LSTMPredictor:
             raise ValueError("No model to save.")
         
         os.makedirs(os.path.dirname(filepath), exist_ok=True)
+        
+        # Use .keras format (newer format) instead of .h5 (legacy)
+        if filepath.endswith('.h5'):
+            filepath = filepath.replace('.h5', '.keras')
+        
+        # Save model in native Keras format
         self.model.save(filepath)
         
         # Save scaler and metadata
         import joblib
-        scaler_path = filepath.replace('.h5', '_scaler.pkl')
+        scaler_path = filepath.replace('.keras', '_scaler.pkl')
         joblib.dump(self.scaler, scaler_path)
         
-        metadata_path = filepath.replace('.h5', '_metadata.pkl')
+        metadata_path = filepath.replace('.keras', '_metadata.pkl')
         joblib.dump({
             'sequence_length': self.sequence_length,
             'n_features': self.n_features,
@@ -360,11 +366,20 @@ class LSTMPredictor:
         """Load a trained model."""
         import joblib
         
+        # Support both .keras and .h5 formats for backward compatibility
+        if not os.path.exists(filepath):
+            # Try .keras if .h5 not found
+            if filepath.endswith('.h5'):
+                keras_path = filepath.replace('.h5', '.keras')
+                if os.path.exists(keras_path):
+                    filepath = keras_path
+        
         self.model = keras.models.load_model(filepath)
         
-        # Load scaler and metadata
-        scaler_path = filepath.replace('.h5', '_scaler.pkl')
-        metadata_path = filepath.replace('.h5', '_metadata.pkl')
+        # Load scaler and metadata (try both extensions)
+        base_path = filepath.replace('.keras', '').replace('.h5', '')
+        scaler_path = base_path + '_scaler.pkl'
+        metadata_path = base_path + '_metadata.pkl'
         
         if os.path.exists(scaler_path):
             self.scaler = joblib.load(scaler_path)
@@ -425,7 +440,7 @@ if __name__ == "__main__":
         print(f"Direction Accuracy: {results['direction_accuracy']:.4f}")
         
         # Save model
-        lstm.save_model("ml_system/models/lstm_model.h5")
+        lstm.save_model("ml_system/models/lstm_model.keras")
     
     finally:
         extractor.close()

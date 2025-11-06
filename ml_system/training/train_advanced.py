@@ -266,7 +266,7 @@ class AdvancedTrainer:
         
         # Save LSTM
         if 'lstm' in self.models:
-            lstm_path = os.path.join(output_dir, "lstm_model.h5")
+            lstm_path = os.path.join(output_dir, "lstm_model.keras")
             self.models['lstm'].save_model(lstm_path)
         
         # Save ensemble
