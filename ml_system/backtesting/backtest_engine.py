@@ -357,7 +357,21 @@ class BacktestEngine:
         running_max = equity_series.expanding().max()
         drawdown = equity_series - running_max
         max_drawdown = drawdown.min()
-        max_drawdown_pct = (max_drawdown / running_max.iloc[drawdown.idxmin()]) * 100 if drawdown.idxmin() is not None else 0
+        
+        # Get the position (integer) of max drawdown, not the index value
+        if len(drawdown) > 0 and not drawdown.isna().all():
+            drawdown_min_idx = drawdown.idxmin()
+            if drawdown_min_idx is not None:
+                # Get integer position of the index
+                try:
+                    position = equity_series.index.get_loc(drawdown_min_idx)
+                    max_drawdown_pct = (max_drawdown / running_max.iloc[position]) * 100 if position < len(running_max) else 0
+                except (KeyError, IndexError):
+                    max_drawdown_pct = 0
+            else:
+                max_drawdown_pct = 0
+        else:
+            max_drawdown_pct = 0
         
         # Sharpe ratio (annualized, assuming daily returns)
         returns = equity_series.pct_change().dropna()

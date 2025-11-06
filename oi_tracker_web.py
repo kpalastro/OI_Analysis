@@ -1053,7 +1053,13 @@ def run_backtest():
                     else:
                         # Model exists but no scaler - use model without scaling
                         logging.warning("Random Forest model found but no scaler. Using model without scaling.")
-                        predictions = trainer.models['random_forest'].predict(X_test)
+                        # Ensure X_test is a DataFrame with proper column names to avoid warnings
+                        if isinstance(X_test, pd.DataFrame):
+                            predictions = trainer.models['random_forest'].predict(X_test)
+                        else:
+                            # Convert to DataFrame if it's not already
+                            X_test_df = pd.DataFrame(X_test, columns=X_test.columns if hasattr(X_test, 'columns') else None)
+                            predictions = trainer.models['random_forest'].predict(X_test_df)
                 except Exception as e:
                     logging.error(f"Error loading random_forest model: {e}", exc_info=True)
                     predictions = None
@@ -1071,17 +1077,31 @@ def run_backtest():
                 if 'random_forest' in trainer.models:
                     if 'random_forest' in trainer.scalers:
                         X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
-                        predictions = trainer.models['random_forest'].predict(X_test_scaled)
+                        # Convert scaled array back to DataFrame with column names
+                        X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns, index=X_test.index)
+                        predictions = trainer.models['random_forest'].predict(X_test_scaled_df)
                     else:
-                        predictions = trainer.models['random_forest'].predict(X_test)
+                        # Ensure X_test is a DataFrame with proper column names
+                        if isinstance(X_test, pd.DataFrame):
+                            predictions = trainer.models['random_forest'].predict(X_test)
+                        else:
+                            X_test_df = pd.DataFrame(X_test, columns=X_test.columns if hasattr(X_test, 'columns') else None)
+                            predictions = trainer.models['random_forest'].predict(X_test_df)
                 else:
                     # Use first available model
                     model_name = list(trainer.models.keys())[0]
                     if model_name in trainer.scalers:
                         X_test_scaled = trainer.scalers[model_name].transform(X_test)
-                        predictions = trainer.models[model_name].predict(X_test_scaled)
+                        # Convert scaled array back to DataFrame with column names
+                        X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns, index=X_test.index)
+                        predictions = trainer.models[model_name].predict(X_test_scaled_df)
                     else:
-                        predictions = trainer.models[model_name].predict(X_test)
+                        # Ensure X_test is a DataFrame with proper column names
+                        if isinstance(X_test, pd.DataFrame):
+                            predictions = trainer.models[model_name].predict(X_test)
+                        else:
+                            X_test_df = pd.DataFrame(X_test, columns=X_test.columns if hasattr(X_test, 'columns') else None)
+                            predictions = trainer.models[model_name].predict(X_test_df)
             
             if predictions is None or len(predictions) == 0:
                 return jsonify({'error': 'Failed to generate predictions. Please ensure models are trained.'}), 500
