@@ -1031,14 +1031,26 @@ def run_backtest():
             
             # Load or train model
             model_path = f"ml_system/models/random_forest_model.pkl"
+            predictions = None
+            
             if os.path.exists(model_path):
-                trainer.models['random_forest'] = joblib.load(model_path)
-                scaler_path = f"ml_system/models/random_forest_scaler.pkl"
-                if os.path.exists(scaler_path):
-                    trainer.scalers['random_forest'] = joblib.load(scaler_path)
-                X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
-                predictions = trainer.models['random_forest'].predict(X_test_scaled)
-            else:
+                try:
+                    trainer.models['random_forest'] = joblib.load(model_path)
+                    scaler_path = f"ml_system/models/random_forest_scaler.pkl"
+                    if os.path.exists(scaler_path):
+                        trainer.scalers['random_forest'] = joblib.load(scaler_path)
+                        X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
+                        predictions = trainer.models['random_forest'].predict(X_test_scaled)
+                    else:
+                        # Model exists but no scaler - use model without scaling
+                        logging.warning("Random Forest model found but no scaler. Using model without scaling.")
+                        predictions = trainer.models['random_forest'].predict(X_test)
+                except Exception as e:
+                    logging.warning(f"Error loading random_forest model: {e}. Will train new model.")
+                    predictions = None
+            
+            # If model loading failed or doesn't exist, train new model
+            if predictions is None:
                 # Train model
                 features_df_filtered = features_df.loc[valid_mask]
                 baseline_results = trainer.train_all_baselines(
@@ -1048,8 +1060,11 @@ def run_backtest():
                 )
                 # Use best model predictions
                 if 'random_forest' in trainer.models:
-                    X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
-                    predictions = trainer.models['random_forest'].predict(X_test_scaled)
+                    if 'random_forest' in trainer.scalers:
+                        X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
+                        predictions = trainer.models['random_forest'].predict(X_test_scaled)
+                    else:
+                        predictions = trainer.models['random_forest'].predict(X_test)
                 else:
                     # Use first available model
                     model_name = list(trainer.models.keys())[0]
@@ -1058,6 +1073,9 @@ def run_backtest():
                         predictions = trainer.models[model_name].predict(X_test_scaled)
                     else:
                         predictions = trainer.models[model_name].predict(X_test)
+            
+            if predictions is None or len(predictions) == 0:
+                return jsonify({'error': 'Failed to generate predictions. Please ensure models are trained.'}), 500
             
             # Run backtest
             result = backtester.backtest_strategy(
