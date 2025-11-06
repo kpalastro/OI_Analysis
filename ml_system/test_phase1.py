@@ -53,7 +53,10 @@ def test_phase1():
         # Test 4: Data Quality Check
         print("\n[Test 4] Data Quality Check:")
         print(f"   Missing values: {features_df.isnull().sum().sum()}")
-        print(f"   Infinite values: {pd.isinf(features_df.select_dtypes(include=[float, int])).sum().sum()}")
+        import numpy as np
+        numeric_df = features_df.select_dtypes(include=[float, int])
+        infinite_count = np.isinf(numeric_df).sum().sum() if not numeric_df.empty else 0
+        print(f"   Infinite values: {infinite_count}")
         
         # Test 5: Target Distribution
         if 'direction' in features_df.columns:

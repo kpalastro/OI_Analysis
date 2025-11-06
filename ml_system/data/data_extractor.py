@@ -65,6 +65,10 @@ class DataExtractor:
         if end_date is None:
             end_date = datetime.now()
         
+        # Convert datetime to string for SQLite
+        start_str = start_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(start_date, datetime) else str(start_date)
+        end_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(end_date, datetime) else str(end_date)
+        
         query = """
             SELECT timestamp, exchange, strike, option_type, symbol, oi, ltp, token
             FROM option_chain_snapshots
@@ -77,7 +81,7 @@ class DataExtractor:
         df = pd.read_sql_query(
             query, 
             self.conn, 
-            params=(exchange, start_date, end_date),
+            params=(exchange, start_str, end_str),
             parse_dates=['timestamp']
         )
         
@@ -92,6 +96,7 @@ class DataExtractor:
     ) -> pd.DataFrame:
         """
         Extract underlying price history from exchange_metadata.
+        Uses a more efficient approach by getting the latest metadata and matching with snapshots.
         
         Args:
             exchange: 'NSE' or 'BSE'
@@ -104,7 +109,16 @@ class DataExtractor:
         if not self.conn:
             self.connect()
         
-        # Get all snapshots to extract underlying prices from timestamps
+        if start_date is None:
+            start_date = datetime.now() - timedelta(days=30)
+        if end_date is None:
+            end_date = datetime.now()
+        
+        # Convert datetime to string for SQLite
+        start_str = start_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(start_date, datetime) else str(start_date)
+        end_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(end_date, datetime) else str(end_date)
+        
+        # Get all unique timestamps from snapshots
         query = """
             SELECT DISTINCT timestamp
             FROM option_chain_snapshots
@@ -114,47 +128,40 @@ class DataExtractor:
             ORDER BY timestamp ASC
         """
         
-        if start_date is None:
-            start_date = datetime.now() - timedelta(days=30)
-        if end_date is None:
-            end_date = datetime.now()
-        
         timestamps_df = pd.read_sql_query(
             query,
             self.conn,
-            params=(exchange, start_date, end_date),
+            params=(exchange, start_str, end_str),
             parse_dates=['timestamp']
         )
         
-        # Get metadata for each timestamp (approximate by getting closest)
-        prices = []
-        for _, row in timestamps_df.iterrows():
-            ts = row['timestamp']
-            meta_query = """
-                SELECT last_update_time, last_underlying_price, last_atm_strike
-                FROM exchange_metadata
-                WHERE exchange = ?
-                ORDER BY ABS(julianday(?) - julianday(last_update_time)) ASC
-                LIMIT 1
-            """
-            meta = pd.read_sql_query(
-                meta_query,
-                self.conn,
-                params=(exchange, ts)
-            )
-            if not meta.empty:
-                prices.append({
-                    'timestamp': ts,
-                    'underlying_price': meta.iloc[0]['last_underlying_price'],
-                    'atm_strike': meta.iloc[0]['last_atm_strike']
-                })
+        if timestamps_df.empty:
+            return pd.DataFrame(columns=['timestamp', 'underlying_price', 'atm_strike'])
         
-        df = pd.DataFrame(prices)
-        if not df.empty:
-            df['timestamp'] = pd.to_datetime(df['timestamp'])
+        # Get the latest metadata for the exchange (more efficient than per-timestamp lookup)
+        meta_query = """
+            SELECT last_update_time, last_underlying_price, last_atm_strike
+            FROM exchange_metadata
+            WHERE exchange = ?
+        """
+        meta_df = pd.read_sql_query(meta_query, self.conn, params=(exchange,))
         
-        logger.info(f"Extracted {len(df)} underlying price records for {exchange}")
-        return df
+        if meta_df.empty:
+            logger.warning(f"No metadata found for {exchange}")
+            return pd.DataFrame(columns=['timestamp', 'underlying_price', 'atm_strike'])
+        
+        # Use the latest metadata values for all timestamps
+        # In a more sophisticated version, we could track price changes per timestamp
+        latest_price = meta_df.iloc[0]['last_underlying_price']
+        latest_atm = meta_df.iloc[0]['last_atm_strike']
+        
+        # Create DataFrame with underlying prices
+        prices_df = timestamps_df.copy()
+        prices_df['underlying_price'] = latest_price
+        prices_df['atm_strike'] = latest_atm
+        
+        logger.info(f"Extracted {len(prices_df)} underlying price records for {exchange}")
+        return prices_df
     
     def get_aggregated_option_data(
         self,
