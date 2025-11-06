@@ -141,17 +141,63 @@ python3 ml_system/test_phase3.py
 - TensorFlow (for LSTM): `pip install tensorflow`
 - All Phase 1 & 2 dependencies
 
-## Phase 4: Backtesting (Planned)
+## Phase 4: Backtesting & Real-time System ✅
 
-- Historical performance testing
-- Risk metrics calculation
-- Trade simulation
+### Components
 
-## Phase 5: Real-time System (Planned)
+1. **Backtesting Engine** (`backtesting/backtest_engine.py`)
+   - Historical strategy simulation
+   - Realistic trade execution (slippage, commissions)
+   - Risk metrics (Sharpe ratio, Sortino ratio, max drawdown)
+   - Position sizing with confidence-based adjustments
+   - Stop-loss and take-profit management
 
-- Live prediction pipeline
-- Signal generation
-- Integration with trading platform
+2. **Real-time Predictor** (`predictions/realtime_predictor.py`)
+   - Live prediction service
+   - Model loading and inference
+   - Ensemble prediction support
+   - Confidence score calculation
+
+3. **Signal Generator** (`predictions/signal_generator.py`)
+   - Trading signal generation (BUY/SELL/HOLD)
+   - Risk management (stop-loss, take-profit)
+   - Position sizing recommendations
+   - Signal filtering and quality control
+
+4. **Performance Monitor** (`monitoring/performance_monitor.py`)
+   - Prediction accuracy tracking
+   - Model drift detection
+   - Performance metrics calculation
+   - Signal distribution analysis
+
+### Usage
+
+```python
+from ml_system.backtesting.backtest_engine import BacktestEngine
+from ml_system.predictions.realtime_predictor import RealTimePredictor
+from ml_system.predictions.signal_generator import SignalGenerator
+
+# Backtesting
+backtester = BacktestEngine(initial_capital=100000.0)
+result = backtester.backtest_strategy(predictions, actual_prices, timestamps)
+backtester.print_results(result)
+
+# Real-time prediction
+predictor = RealTimePredictor()
+predictor.load_models()
+result = predictor.predict_and_signal(features_df)
+
+# Signal generation
+signal_gen = SignalGenerator()
+signal = signal_gen.generate_signal(prediction, confidence, current_price)
+```
+
+### Testing
+
+```bash
+python3 ml_system/test_phase4.py
+```
+
 
 ## Directory Structure
 
@@ -159,9 +205,11 @@ python3 ml_system/test_phase3.py
 ml_system/
 ├── data/              # Data extraction
 ├── features/          # Feature engineering
-├── models/            # Model definitions
+├── models/            # Model definitions (LSTM, Ensemble)
 ├── training/          # Training scripts
-├── predictions/       # Prediction pipeline
+├── backtesting/       # Backtesting engine
+├── predictions/       # Real-time prediction & signals
+├── monitoring/        # Performance monitoring
 ├── utils/             # Utility functions
 └── config.py          # Configuration
 ```
@@ -171,6 +219,7 @@ ml_system/
 ✅ **Phase 1 Complete**: Data extraction and feature engineering modules are ready.
 ✅ **Phase 2 Complete**: Baseline models (Linear, Ridge, Random Forest, XGBoost) with evaluation tools.
 ✅ **Phase 3 Complete**: Advanced models (LSTM, Ensemble) for improved predictions.
+✅ **Phase 4 Complete**: Backtesting engine and real-time prediction system.
 
 ## Next Steps
 
@@ -179,5 +228,6 @@ ml_system/
 3. ✅ Create baseline models
 4. ✅ Evaluate initial performance
 5. ✅ Implement advanced models (LSTM, Ensemble)
-6. **Next**: Phase 4 - Backtesting & Real-time System
+6. ✅ Build backtesting and real-time system
+7. **Next**: Integration with trading platform or further optimization
 
