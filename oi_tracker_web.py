@@ -1049,7 +1049,9 @@ def run_backtest():
                         loaded_scaler = joblib.load(scaler_path)
                         trainer.scalers['random_forest'] = loaded_scaler
                         X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
-                        predictions = trainer.models['random_forest'].predict(X_test_scaled)
+                        # Convert scaled array back to DataFrame with column names
+                        X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns, index=X_test.index)
+                        predictions = trainer.models['random_forest'].predict(X_test_scaled_df)
                     else:
                         # Model exists but no scaler - use model without scaling
                         logging.warning("Random Forest model found but no scaler. Using model without scaling.")
