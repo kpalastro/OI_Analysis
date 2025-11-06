@@ -17,6 +17,18 @@ from kiteconnect import KiteTicker
 import database as db
 from dotenv import load_dotenv
 
+# ML System imports
+try:
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from ml_system.predictions.realtime_predictor import RealTimePredictor
+    from ml_system.predictions.signal_generator import SignalGenerator
+    from ml_system.features.feature_engineer import FeatureEngineer
+    ML_SYSTEM_AVAILABLE = True
+except ImportError as e:
+    ML_SYSTEM_AVAILABLE = False
+    logging.warning(f"ML System not available: {e}")
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -147,7 +159,11 @@ latest_oi_data = {
         'pcr': None,
         'exchange': 'NSE',
         'underlying_name': 'NIFTY',
-        'strike_difference': 50
+        'strike_difference': 50,
+        'ml_prediction': None,
+        'ml_signal': None,
+        'ml_confidence': None,
+        'ml_prediction_pct': None
     },
     'BSE': {
         'call_options': [],
@@ -159,9 +175,19 @@ latest_oi_data = {
         'pcr': None,
         'exchange': 'BSE',
         'underlying_name': 'SENSEX',
-        'strike_difference': 100
+        'strike_difference': 100,
+        'ml_prediction': None,
+        'ml_signal': None,
+        'ml_confidence': None,
+        'ml_prediction_pct': None
     }
 }
+
+# ML System objects (initialized later)
+ml_predictor = None
+ml_signal_generator = None
+ml_feature_engineer = None
+ml_models_loaded = False
 
 # Paper Trading: Open Positions (per exchange)
 # Structure: {exchange: {position_id: {symbol, type, side, entry_price, qty, entry_time, current_price, mtm}}}
@@ -727,6 +753,7 @@ def run_data_update_loop_exchange(exchange):
         exchange: 'NSE' or 'BSE'
     """
     global kite, latest_oi_data, exchange_instruments, kws
+    global ml_predictor, ml_signal_generator, ml_feature_engineer, ml_models_loaded
     
     # Get exchange-specific configuration
     config = EXCHANGE_CONFIGS[exchange]
@@ -813,6 +840,53 @@ def run_data_update_loop_exchange(exchange):
             # Monitor open positions and auto-exit if needed
             monitor_positions(call_options, put_options, exchange)
             
+            # Generate ML prediction if available
+            ml_prediction_data = None
+            if ml_models_loaded and ml_predictor and ml_feature_engineer and underlying_ltp:
+                try:
+                    # Get recent data for feature engineering
+                    from ml_system.data.data_extractor import DataExtractor
+                    extractor = DataExtractor()
+                    try:
+                        # Get last few records for feature engineering
+                        raw_data = extractor.get_time_series_data(exchange, lookback_days=1)
+                        if not raw_data.empty:
+                            # Engineer features
+                            features_df = ml_feature_engineer.engineer_all_features(raw_data)
+                            if not features_df.empty:
+                                # Get latest features
+                                feature_cols = [col for col in features_df.columns 
+                                               if col not in ['timestamp', 'future_price', 'price_change', 'price_change_pct', 'direction']]
+                                latest_features = features_df[feature_cols].iloc[[-1]]
+                                
+                                # Make prediction
+                                prediction_result = ml_predictor.predict_and_signal(
+                                    latest_features,
+                                    entry_threshold=0.02,
+                                    min_confidence=0.5
+                                )
+                                
+                                # Generate signal
+                                signal = ml_signal_generator.generate_signal(
+                                    prediction=prediction_result['prediction'],
+                                    confidence=prediction_result['confidence'],
+                                    current_price=underlying_ltp,
+                                    capital=100000.0
+                                )
+                                
+                                ml_prediction_data = {
+                                    'prediction': prediction_result['prediction'],
+                                    'prediction_pct': prediction_result['prediction'],
+                                    'confidence': prediction_result['confidence'],
+                                    'signal': signal.signal_type,
+                                    'strength': signal.strength,
+                                    'reasoning': signal.reasoning
+                                }
+                    finally:
+                        extractor.close()
+                except Exception as e:
+                    logging.warning(f"{exchange}: ML prediction error: {e}")
+            
             # Update global data
             with data_lock:
                 latest_oi_data[exchange]['call_options'] = call_options
@@ -822,6 +896,13 @@ def run_data_update_loop_exchange(exchange):
                 latest_oi_data[exchange]['last_update'] = datetime.now().strftime('%H:%M:%S')
                 latest_oi_data[exchange]['status'] = 'Live'
                 latest_oi_data[exchange]['pcr'] = pcr
+                if ml_prediction_data:
+                    latest_oi_data[exchange]['ml_prediction'] = ml_prediction_data['prediction']
+                    latest_oi_data[exchange]['ml_prediction_pct'] = ml_prediction_data['prediction_pct']
+                    latest_oi_data[exchange]['ml_signal'] = ml_prediction_data['signal']
+                    latest_oi_data[exchange]['ml_confidence'] = ml_prediction_data['confidence']
+                    latest_oi_data[exchange]['ml_strength'] = ml_prediction_data['strength']
+                    latest_oi_data[exchange]['ml_reasoning'] = ml_prediction_data['reasoning']
             
             # Save to database (including underlying price and ATM strike)
             current_timestamp = datetime.now()
@@ -1027,6 +1108,7 @@ signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
 def initialize_system():
     """Initialize the trading system with dual exchange support and start background threads."""
     global kite, kws, exchange_instruments, latest_oi_data, oi_history
+    global ml_predictor, ml_signal_generator, ml_feature_engineer, ml_models_loaded
     
     print("=" * 70)
     print("DUAL EXCHANGE OI TRACKER - NSE (NIFTY) & BSE (SENSEX)")
@@ -1306,12 +1388,33 @@ def initialize_system():
     bse_thread.start()
     print("✓ BSE (SENSEX) update thread started")
     
+    # Initialize ML System if available
+    if ML_SYSTEM_AVAILABLE:
+        try:
+            print("\n" + "=" * 70)
+            print("INITIALIZING ML PREDICTION SYSTEM")
+            print("=" * 70)
+            ml_predictor = RealTimePredictor()
+            ml_signal_generator = SignalGenerator()
+            ml_feature_engineer = FeatureEngineer()
+            ml_predictor.load_models()
+            ml_models_loaded = ml_predictor.is_loaded
+            if ml_models_loaded:
+                print("✓ ML models loaded successfully")
+            else:
+                print("⚠️  ML models not found. Train models first using: python3 ml_system/test_phase2.py")
+        except Exception as e:
+            logging.warning(f"ML System initialization failed: {e}")
+            ml_models_loaded = False
+    
     print("\n" + "=" * 70)
     print("✓ SYSTEM INITIALIZED SUCCESSFULLY!")
     print("=" * 70)
     print(f"\n🌐 Web interface will be available at: http://localhost:5000")
     print("📊 Tracking: NIFTY (NSE) and SENSEX (BSE)")
     print(f"🔄 Refresh interval: {REFRESH_INTERVAL_SECONDS} seconds")
+    if ml_models_loaded:
+        print("🤖 ML Predictions: Enabled")
     print("💾 Database: Enabled (30-day retention)")
     print("💰 Underlying prices: Saved with every refresh")
     print("\nPress Ctrl+C to stop the server\n")

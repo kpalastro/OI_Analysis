@@ -297,6 +297,89 @@
             border-bottom: 1px solid rgba(255, 255, 255, 0.05);
         }
 
+        /* ML Prediction Card */
+        .ml-prediction-card {
+            background: var(--card-bg);
+            border: 1px solid var(--card-border);
+            border-radius: 8px;
+            margin: 10px;
+            padding: 12px;
+            backdrop-filter: blur(10px);
+        }
+
+        .ml-card-header {
+            font-size: 0.9rem;
+            font-weight: 600;
+            margin-bottom: 10px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .ml-card-body {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+        }
+
+        .ml-prediction-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .ml-label {
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+        }
+
+        .ml-value {
+            font-size: 0.9rem;
+            font-weight: 600;
+            color: var(--text-primary);
+        }
+
+        .ml-signal {
+            padding: 4px 8px;
+            border-radius: 4px;
+            display: inline-block;
+            width: fit-content;
+        }
+
+        .ml-signal.BUY {
+            background: rgba(72, 187, 120, 0.2);
+            color: var(--itm-color);
+            border: 1px solid var(--itm-color);
+        }
+
+        .ml-signal.SELL {
+            background: rgba(245, 101, 101, 0.2);
+            color: var(--otm-color);
+            border: 1px solid var(--otm-color);
+        }
+
+        .ml-signal.HOLD {
+            background: rgba(160, 174, 192, 0.2);
+            color: var(--text-secondary);
+            border: 1px solid var(--text-secondary);
+        }
+
+        .ml-reasoning {
+            grid-column: 1 / -1;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+            margin-top: 8px;
+            padding-top: 8px;
+            border-top: 1px solid var(--card-border);
+        }
+
+        .info-item.ml-prediction {
+            border-left: 2px solid rgba(102, 126, 234, 0.5);
+            padding-left: 12px;
+        }
+
         .type-badge {
             padding: 2px 8px;
             border-radius: 3px;
@@ -433,6 +516,36 @@
                             <div class="label">Updated</div>
                             <div class="value" id="lastUpdateNSE">--:--</div>
                         </div>
+                        <div class="info-item ml-prediction" id="mlPredictionNSE" style="display: none;">
+                            <div class="label">ML Signal</div>
+                            <div class="value" id="mlSignalNSE">--</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- ML Prediction Card -->
+                <div class="ml-prediction-card" id="mlCardNSE" style="display: none;">
+                    <div class="ml-card-header">
+                        <i class="bi bi-robot"></i> ML Prediction
+                    </div>
+                    <div class="ml-card-body">
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Signal:</span>
+                            <span class="ml-value ml-signal" id="mlSignalTextNSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Prediction:</span>
+                            <span class="ml-value" id="mlPredictionTextNSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Confidence:</span>
+                            <span class="ml-value" id="mlConfidenceNSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Strength:</span>
+                            <span class="ml-value" id="mlStrengthNSE">--</span>
+                        </div>
+                        <div class="ml-reasoning" id="mlReasoningNSE"></div>
                     </div>
                 </div>
                 
@@ -492,6 +605,36 @@
                             <div class="label">Updated</div>
                             <div class="value" id="lastUpdateBSE">--:--</div>
                         </div>
+                        <div class="info-item ml-prediction" id="mlPredictionBSE" style="display: none;">
+                            <div class="label">ML Signal</div>
+                            <div class="value" id="mlSignalBSE">--</div>
+                        </div>
+                    </div>
+                </div>
+                
+                <!-- ML Prediction Card -->
+                <div class="ml-prediction-card" id="mlCardBSE" style="display: none;">
+                    <div class="ml-card-header">
+                        <i class="bi bi-robot"></i> ML Prediction
+                    </div>
+                    <div class="ml-card-body">
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Signal:</span>
+                            <span class="ml-value ml-signal" id="mlSignalTextBSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Prediction:</span>
+                            <span class="ml-value" id="mlPredictionTextBSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Confidence:</span>
+                            <span class="ml-value" id="mlConfidenceBSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Strength:</span>
+                            <span class="ml-value" id="mlStrengthBSE">--</span>
+                        </div>
+                        <div class="ml-reasoning" id="mlReasoningBSE"></div>
                     </div>
                 </div>
                 
@@ -631,6 +774,57 @@
             
             if (data.last_update) {
                 document.getElementById(`lastUpdate${suffix}`).textContent = data.last_update;
+            }
+            
+            // Update ML Prediction
+            if (data.ml_signal) {
+                const mlCard = document.getElementById(`mlCard${suffix}`);
+                const mlPrediction = document.getElementById(`mlPrediction${suffix}`);
+                if (mlCard) mlCard.style.display = 'block';
+                if (mlPrediction) mlPrediction.style.display = 'flex';
+                
+                // Update signal
+                const mlSignal = document.getElementById(`mlSignal${suffix}`);
+                const mlSignalText = document.getElementById(`mlSignalText${suffix}`);
+                if (mlSignal) {
+                    mlSignal.textContent = data.ml_signal;
+                    mlSignal.className = `ml-value ml-signal ${data.ml_signal}`;
+                }
+                if (mlSignalText) {
+                    mlSignalText.textContent = data.ml_signal;
+                    mlSignalText.className = `ml-value ml-signal ${data.ml_signal}`;
+                }
+                
+                // Update prediction
+                const mlPredictionText = document.getElementById(`mlPredictionText${suffix}`);
+                if (mlPredictionText && data.ml_prediction_pct != null) {
+                    const pred = data.ml_prediction_pct;
+                    mlPredictionText.textContent = (pred >= 0 ? '+' : '') + pred.toFixed(4) + '%';
+                    mlPredictionText.style.color = pred >= 0 ? '#38ef7d' : '#f45c43';
+                }
+                
+                // Update confidence
+                const mlConfidence = document.getElementById(`mlConfidence${suffix}`);
+                if (mlConfidence && data.ml_confidence != null) {
+                    mlConfidence.textContent = (data.ml_confidence * 100).toFixed(1) + '%';
+                }
+                
+                // Update strength
+                const mlStrength = document.getElementById(`mlStrength${suffix}`);
+                if (mlStrength && data.ml_strength != null) {
+                    mlStrength.textContent = (data.ml_strength * 100).toFixed(1) + '%';
+                }
+                
+                // Update reasoning
+                const mlReasoning = document.getElementById(`mlReasoning${suffix}`);
+                if (mlReasoning && data.ml_reasoning) {
+                    mlReasoning.textContent = data.ml_reasoning;
+                }
+            } else {
+                const mlCard = document.getElementById(`mlCard${suffix}`);
+                const mlPrediction = document.getElementById(`mlPrediction${suffix}`);
+                if (mlCard) mlCard.style.display = 'none';
+                if (mlPrediction) mlPrediction.style.display = 'none';
             }
             
             if (data.call_options && data.put_options) {
