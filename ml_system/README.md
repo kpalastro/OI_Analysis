@@ -89,11 +89,57 @@ best_name, best_result = trainer.get_best_model('test_r2')
 python3 ml_system/test_phase2.py
 ```
 
-## Phase 3: Advanced Models (Planned)
+## Phase 3: Advanced Models ✅
 
-- LSTM/Transformer for time series
-- Ensemble methods
-- Multi-task learning
+### Components
+
+1. **LSTM Model** (`models/lstm_model.py`)
+   - Deep learning for time series prediction
+   - Multi-layer LSTM with dropout and batch normalization
+   - Sequence-based learning (captures temporal patterns)
+   - Early stopping and learning rate scheduling
+
+2. **Ensemble Model** (`models/ensemble_model.py`)
+   - Weighted average ensemble
+   - Stacking ensemble (with meta-learner)
+   - Combines baseline and advanced models
+   - Performance-based weight calculation
+
+3. **Advanced Training** (`training/train_advanced.py`)
+   - Trains LSTM models
+   - Creates ensembles from multiple models
+   - Integrates with baseline models
+
+### Usage
+
+```python
+from ml_system.training.train_advanced import AdvancedTrainer
+from ml_system.training.train_baseline import BaselineTrainer
+
+# Train baseline models first
+baseline_trainer = BaselineTrainer()
+baseline_results = baseline_trainer.train_all_baselines(features_df, ...)
+
+# Train advanced models
+advanced_trainer = AdvancedTrainer()
+advanced_results = advanced_trainer.train_all_advanced(
+    X_train, y_train, X_test, y_test,
+    baseline_results,
+    train_lstm=True,
+    create_ensemble=True
+)
+```
+
+### Testing
+
+```bash
+python3 ml_system/test_phase3.py
+```
+
+### Requirements
+
+- TensorFlow (for LSTM): `pip install tensorflow`
+- All Phase 1 & 2 dependencies
 
 ## Phase 4: Backtesting (Planned)
 
@@ -124,6 +170,7 @@ ml_system/
 
 ✅ **Phase 1 Complete**: Data extraction and feature engineering modules are ready.
 ✅ **Phase 2 Complete**: Baseline models (Linear, Ridge, Random Forest, XGBoost) with evaluation tools.
+✅ **Phase 3 Complete**: Advanced models (LSTM, Ensemble) for improved predictions.
 
 ## Next Steps
 
@@ -131,5 +178,6 @@ ml_system/
 2. ✅ Validate feature engineering
 3. ✅ Create baseline models
 4. ✅ Evaluate initial performance
-5. **Next**: Phase 3 - Advanced Models (LSTM/Transformer)
+5. ✅ Implement advanced models (LSTM, Ensemble)
+6. **Next**: Phase 4 - Backtesting & Real-time System
 

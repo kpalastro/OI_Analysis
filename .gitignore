@@ -36,3 +36,9 @@ dist/
 Thumbs.db
 desktop.ini
 
+# ML System generated files
+ml_system/models/*.pkl
+ml_system/models/*.h5
+ml_system/training/reports/*.png
+ml_system/training/reports/*.csv
+
