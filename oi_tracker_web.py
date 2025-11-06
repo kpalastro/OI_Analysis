@@ -1030,15 +1030,24 @@ def run_backtest():
             timestamps_test = timestamps.iloc[split_idx:]
             
             # Load or train model
-            model_path = f"ml_system/models/random_forest_model.pkl"
+            model_path = "ml_system/models/random_forest_model.pkl"
             predictions = None
+            
+            # Ensure trainer has models and scalers dicts
+            if not hasattr(trainer, 'models'):
+                trainer.models = {}
+            if not hasattr(trainer, 'scalers'):
+                trainer.scalers = {}
             
             if os.path.exists(model_path):
                 try:
-                    trainer.models['random_forest'] = joblib.load(model_path)
-                    scaler_path = f"ml_system/models/random_forest_scaler.pkl"
+                    loaded_model = joblib.load(model_path)
+                    trainer.models['random_forest'] = loaded_model
+                    
+                    scaler_path = "ml_system/models/random_forest_scaler.pkl"
                     if os.path.exists(scaler_path):
-                        trainer.scalers['random_forest'] = joblib.load(scaler_path)
+                        loaded_scaler = joblib.load(scaler_path)
+                        trainer.scalers['random_forest'] = loaded_scaler
                         X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
                         predictions = trainer.models['random_forest'].predict(X_test_scaled)
                     else:
@@ -1046,7 +1055,7 @@ def run_backtest():
                         logging.warning("Random Forest model found but no scaler. Using model without scaling.")
                         predictions = trainer.models['random_forest'].predict(X_test)
                 except Exception as e:
-                    logging.warning(f"Error loading random_forest model: {e}. Will train new model.")
+                    logging.error(f"Error loading random_forest model: {e}", exc_info=True)
                     predictions = None
             
             # If model loading failed or doesn't exist, train new model
