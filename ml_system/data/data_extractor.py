@@ -95,8 +95,8 @@ class DataExtractor:
         end_date: Optional[datetime] = None
     ) -> pd.DataFrame:
         """
-        Extract underlying price history from exchange_metadata.
-        Uses a more efficient approach by getting the latest metadata and matching with snapshots.
+        Extract underlying price history by inferring from ATM strikes in option chain snapshots.
+        Since ATM strike is calculated from underlying price, we can use it as a proxy.
         
         Args:
             exchange: 'NSE' or 'BSE'
@@ -118,49 +118,93 @@ class DataExtractor:
         start_str = start_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(start_date, datetime) else str(start_date)
         end_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(end_date, datetime) else str(end_date)
         
-        # Get all unique timestamps from snapshots
+        # Get strike distribution per timestamp to infer ATM
+        # ATM is typically the strike with the highest combined OI or the middle strike
         query = """
-            SELECT DISTINCT timestamp
+            SELECT 
+                timestamp,
+                strike,
+                SUM(oi) as total_oi,
+                COUNT(*) as option_count
             FROM option_chain_snapshots
             WHERE exchange = ?
             AND timestamp >= ?
             AND timestamp <= ?
-            ORDER BY timestamp ASC
+            AND oi IS NOT NULL
+            GROUP BY timestamp, strike
+            ORDER BY timestamp ASC, total_oi DESC
         """
         
-        timestamps_df = pd.read_sql_query(
+        strike_data = pd.read_sql_query(
             query,
             self.conn,
             params=(exchange, start_str, end_str),
             parse_dates=['timestamp']
         )
         
-        if timestamps_df.empty:
+        if strike_data.empty:
+            logger.warning(f"No strike data found for {exchange}")
             return pd.DataFrame(columns=['timestamp', 'underlying_price', 'atm_strike'])
         
-        # Get the latest metadata for the exchange (more efficient than per-timestamp lookup)
-        meta_query = """
-            SELECT last_update_time, last_underlying_price, last_atm_strike
-            FROM exchange_metadata
-            WHERE exchange = ?
-        """
-        meta_df = pd.read_sql_query(meta_query, self.conn, params=(exchange,))
+        # For each timestamp, find the ATM strike and infer underlying price
+        prices_list = []
         
-        if meta_df.empty:
-            logger.warning(f"No metadata found for {exchange}")
-            return pd.DataFrame(columns=['timestamp', 'underlying_price', 'atm_strike'])
+        for timestamp in strike_data['timestamp'].unique():
+            timestamp_data = strike_data[strike_data['timestamp'] == timestamp]
+            
+            # Get all strikes for this timestamp
+            strikes = sorted(timestamp_data['strike'].unique())
+            
+            if len(strikes) == 0:
+                continue
+            
+            # Method: Use the median strike as ATM (most stable)
+            # The median strike in the option chain is typically close to ATM
+            median_strike = timestamp_data['strike'].median()
+            
+            # Alternative: Use strike with highest OI (but this can be noisy)
+            max_oi_row = timestamp_data.loc[timestamp_data['total_oi'].idxmax()]
+            max_oi_strike = max_oi_row['strike']
+            
+            # Use median as primary (more stable), but if max OI is very close, use it
+            if abs(max_oi_strike - median_strike) <= 25:  # Within 25 points
+                atm_strike = max_oi_strike
+            else:
+                atm_strike = median_strike
+            
+            # Infer underlying price from ATM strike
+            # ATM is calculated as: round(underlying_price / strike_diff) * strike_diff
+            # So underlying_price ≈ ATM_strike (for NIFTY with 50 strike diff)
+            # For more accuracy, we could reverse the calculation, but this approximation works
+            underlying_price = atm_strike
+            
+            prices_list.append({
+                'timestamp': timestamp,
+                'underlying_price': underlying_price,
+                'atm_strike': atm_strike
+            })
         
-        # Use the latest metadata values for all timestamps
-        # In a more sophisticated version, we could track price changes per timestamp
-        latest_price = meta_df.iloc[0]['last_underlying_price']
-        latest_atm = meta_df.iloc[0]['last_atm_strike']
+        prices_df = pd.DataFrame(prices_list)
         
-        # Create DataFrame with underlying prices
-        prices_df = timestamps_df.copy()
-        prices_df['underlying_price'] = latest_price
-        prices_df['atm_strike'] = latest_atm
+        if not prices_df.empty:
+            # Sort by timestamp
+            prices_df = prices_df.sort_values('timestamp').reset_index(drop=True)
+            
+            # Smooth the prices (moving average) to reduce noise
+            window_size = min(5, len(prices_df) // 10 + 1)
+            if window_size > 1:
+                prices_df['underlying_price'] = prices_df['underlying_price'].rolling(
+                    window=window_size, center=True, min_periods=1
+                ).mean()
+                prices_df['atm_strike'] = prices_df['atm_strike'].rolling(
+                    window=window_size, center=True, min_periods=1
+                ).mean()
         
         logger.info(f"Extracted {len(prices_df)} underlying price records for {exchange}")
+        if not prices_df.empty:
+            price_range = prices_df['underlying_price'].max() - prices_df['underlying_price'].min()
+            logger.info(f"Price range: {price_range:.2f} points (min: {prices_df['underlying_price'].min():.2f}, max: {prices_df['underlying_price'].max():.2f})")
+        
         return prices_df
     
     def get_aggregated_option_data(
@@ -258,14 +302,24 @@ class DataExtractor:
         
         # Create target: future underlying price change
         if 'underlying_price' in df.columns:
-            df['future_price'] = df['underlying_price'].shift(-target_minutes)
-            df['price_change'] = df['future_price'] - df['underlying_price']
-            df['price_change_pct'] = (df['price_change'] / df['underlying_price']) * 100
+            # Since data is sampled every ~30 seconds, we need to shift by number of rows
+            # target_minutes = 15 means we want 15 minutes ahead
+            # If refresh interval is 30 seconds, that's 30 rows ahead (15 * 60 / 30)
+            # But we'll use a more flexible approach: shift by a reasonable number of rows
+            # Estimate rows per minute (assuming ~2 rows per minute based on 30s refresh)
+            rows_per_minute = 2  # Approximate
+            shift_rows = max(1, int(target_minutes * rows_per_minute))
             
-            # Direction target (1 for up, 0 for down, -1 for neutral)
+            df['future_price'] = df['underlying_price'].shift(-shift_rows)
+            df['price_change'] = df['future_price'] - df['underlying_price']
+            df['price_change_pct'] = (df['price_change'] / (df['underlying_price'] + 1e-10)) * 100
+            
+            # Direction target (1 for up, -1 for down, 0 for neutral)
+            # Use a smaller threshold since we're using ATM strikes (less precise)
+            threshold = 0.05  # 0.05% change threshold
             df['direction'] = 0
-            df.loc[df['price_change_pct'] > 0.1, 'direction'] = 1  # Up
-            df.loc[df['price_change_pct'] < -0.1, 'direction'] = -1  # Down
+            df.loc[df['price_change_pct'] > threshold, 'direction'] = 1  # Up
+            df.loc[df['price_change_pct'] < -threshold, 'direction'] = -1  # Down
         
         # Remove rows with NaN targets (last rows)
         df = df.dropna(subset=['price_change'])
