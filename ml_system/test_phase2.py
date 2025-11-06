@@ -5,7 +5,11 @@ Run this to test Phase 2 functionality.
 
 import sys
 import os
-sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+# Add parent directory to path so we can import ml_system
+current_dir = os.path.dirname(os.path.abspath(__file__))
+parent_dir = os.path.dirname(current_dir)
+sys.path.insert(0, parent_dir)
 
 from ml_system.data.data_extractor import DataExtractor
 from ml_system.features.feature_engineer import FeatureEngineer
