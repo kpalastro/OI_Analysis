@@ -70,8 +70,10 @@ def test_phase3():
         
         # Step 3: Train baseline models
         print("\n[Step 3] Training baseline models...")
+        # Filter features_df using loc instead of iloc for boolean indexing
+        features_df_filtered = features_df.loc[valid_mask].copy()
         baseline_results = baseline_trainer.train_all_baselines(
-            features_df.iloc[valid_mask],
+            features_df_filtered,
             target_col='price_change_pct',
             task='regression'
         )

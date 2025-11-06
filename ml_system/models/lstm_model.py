@@ -23,9 +23,14 @@ try:
     from tensorflow.keras.optimizers import Adam
     from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau, ModelCheckpoint
     TENSORFLOW_AVAILABLE = True
+    # Create dummy types for type hints when TensorFlow is not available
+    keras_Model = keras.Model
 except ImportError:
     TENSORFLOW_AVAILABLE = False
-    print("Warning: TensorFlow not available. Install with: pip install tensorflow")
+    # Create dummy classes for type hints
+    class keras_Model:
+        pass
+    keras = None
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -90,7 +95,7 @@ class LSTMPredictor:
         
         return np.array(X), np.array(y)
     
-    def build_model(self, input_shape: Tuple[int, int]) -> keras.Model:
+    def build_model(self, input_shape: Tuple[int, int]) -> keras_Model:
         """
         Build LSTM model architecture.
         
