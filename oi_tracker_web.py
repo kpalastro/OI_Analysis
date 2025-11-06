@@ -947,6 +947,183 @@ def index():
                           intervals=OI_CHANGE_INTERVALS_MIN,
                           thresholds=PCT_CHANGE_THRESHOLDS)
 
+@app.route('/backtest')
+def backtest_page():
+    """Backtesting page route."""
+    return render_template('backtest.html',
+                          exchanges=['NSE', 'BSE'],
+                          exchange_configs=EXCHANGE_CONFIGS)
+
+@app.route('/api/backtest', methods=['POST'])
+def run_backtest():
+    """API endpoint to run backtest."""
+    try:
+        from ml_system.backtesting.backtest_engine import BacktestEngine
+        from ml_system.data.data_extractor import DataExtractor
+        from ml_system.features.feature_engineer import FeatureEngineer
+        from ml_system.training.train_baseline import BaselineTrainer
+        import joblib
+        
+        data = request.get_json()
+        
+        # Get parameters
+        exchange = data.get('exchange', 'NSE')
+        initial_capital = float(data.get('initial_capital', 100000))
+        entry_threshold = float(data.get('entry_threshold', 0.02))
+        exit_threshold = float(data.get('exit_threshold', 0.05))
+        stop_loss_pct = float(data.get('stop_loss_pct', 0.03))
+        max_holding_periods = int(data.get('max_holding_periods', 30))
+        lookback_days = int(data.get('lookback_days', 30))
+        commission_rate = float(data.get('commission_rate', 0.0003))
+        slippage = float(data.get('slippage', 0.0001))
+        position_size_pct = float(data.get('position_size_pct', 0.1))
+        
+        # Initialize backtester
+        backtester = BacktestEngine(
+            initial_capital=initial_capital,
+            commission_rate=commission_rate,
+            slippage=slippage,
+            position_size_pct=position_size_pct
+        )
+        
+        # Get data and train/load model
+        extractor = DataExtractor()
+        engineer = FeatureEngineer()
+        trainer = BaselineTrainer()
+        
+        try:
+            # Get time series data
+            raw_data = extractor.get_time_series_data(exchange, lookback_days=lookback_days)
+            
+            if raw_data.empty:
+                return jsonify({'error': 'No data available for backtesting'}), 400
+            
+            # Engineer features
+            features_df = engineer.engineer_all_features(raw_data)
+            
+            if features_df.empty:
+                return jsonify({'error': 'Feature engineering failed'}), 400
+            
+            # Prepare data
+            feature_cols = [col for col in features_df.columns 
+                           if col not in ['timestamp', 'future_price', 'price_change', 'price_change_pct', 'direction']]
+            X = features_df[feature_cols]
+            y = features_df['price_change_pct']
+            prices = features_df['underlying_price']
+            timestamps = features_df['timestamp']
+            
+            # Remove NaN
+            valid_mask = ~(X.isna().any(axis=1) | y.isna() | prices.isna())
+            X = X[valid_mask]
+            y = y[valid_mask]
+            prices = prices[valid_mask]
+            timestamps = timestamps[valid_mask]
+            
+            if len(X) == 0:
+                return jsonify({'error': 'No valid data after cleaning'}), 400
+            
+            # Split data (80% train, 20% test)
+            split_idx = int(len(X) * 0.8)
+            X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+            y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+            prices_test = prices.iloc[split_idx:]
+            timestamps_test = timestamps.iloc[split_idx:]
+            
+            # Load or train model
+            model_path = f"ml_system/models/random_forest_model.pkl"
+            if os.path.exists(model_path):
+                trainer.models['random_forest'] = joblib.load(model_path)
+                scaler_path = f"ml_system/models/random_forest_scaler.pkl"
+                if os.path.exists(scaler_path):
+                    trainer.scalers['random_forest'] = joblib.load(scaler_path)
+                X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
+                predictions = trainer.models['random_forest'].predict(X_test_scaled)
+            else:
+                # Train model
+                features_df_filtered = features_df.loc[valid_mask]
+                baseline_results = trainer.train_all_baselines(
+                    features_df_filtered,
+                    target_col='price_change_pct',
+                    task='regression'
+                )
+                # Use best model predictions
+                if 'random_forest' in trainer.models:
+                    X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
+                    predictions = trainer.models['random_forest'].predict(X_test_scaled)
+                else:
+                    # Use first available model
+                    model_name = list(trainer.models.keys())[0]
+                    if model_name in trainer.scalers:
+                        X_test_scaled = trainer.scalers[model_name].transform(X_test)
+                        predictions = trainer.models[model_name].predict(X_test_scaled)
+                    else:
+                        predictions = trainer.models[model_name].predict(X_test)
+            
+            # Run backtest
+            result = backtester.backtest_strategy(
+                predictions=pd.Series(predictions),
+                actual_prices=pd.Series(prices_test.values),
+                timestamps=pd.Series(timestamps_test.values),
+                entry_threshold=entry_threshold,
+                exit_threshold=exit_threshold,
+                stop_loss_pct=stop_loss_pct,
+                max_holding_periods=max_holding_periods
+            )
+            
+            # Prepare response
+            trades_data = []
+            for trade in result.trades:
+                trades_data.append({
+                    'entry_time': trade.entry_time.isoformat() if trade.entry_time else None,
+                    'exit_time': trade.exit_time.isoformat() if trade.exit_time else None,
+                    'entry_price': trade.entry_price,
+                    'exit_price': trade.exit_price,
+                    'quantity': trade.quantity,
+                    'trade_type': trade.trade_type.value,
+                    'pnl': trade.pnl,
+                    'pnl_pct': trade.pnl_pct,
+                    'exit_reason': trade.exit_reason
+                })
+            
+            equity_curve_data = []
+            for timestamp, equity in result.equity_curve.items():
+                equity_curve_data.append({
+                    'timestamp': timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
+                    'equity': float(equity)
+                })
+            
+            response = {
+                'success': True,
+                'results': {
+                    'total_trades': result.total_trades,
+                    'winning_trades': result.winning_trades,
+                    'losing_trades': result.losing_trades,
+                    'total_pnl': float(result.total_pnl),
+                    'total_return_pct': float(result.total_return_pct),
+                    'win_rate': float(result.win_rate),
+                    'avg_win': float(result.avg_win),
+                    'avg_loss': float(result.avg_loss),
+                    'profit_factor': float(result.profit_factor),
+                    'max_drawdown': float(result.max_drawdown),
+                    'max_drawdown_pct': float(result.max_drawdown_pct),
+                    'sharpe_ratio': float(result.sharpe_ratio),
+                    'sortino_ratio': float(result.sortino_ratio),
+                    'initial_capital': float(initial_capital),
+                    'final_capital': float(initial_capital + result.total_pnl)
+                },
+                'trades': trades_data,
+                'equity_curve': equity_curve_data
+            }
+            
+            return jsonify(response)
+        
+        finally:
+            extractor.close()
+    
+    except Exception as e:
+        logging.error(f"Backtest error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
+
 @app.route('/api/data')
 def get_data():
     """API endpoint to get current OI data for all exchanges."""
