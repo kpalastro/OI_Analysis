@@ -27,9 +27,10 @@ warnings.filterwarnings('ignore')
 try:
     import xgboost as xgb
     XGBOOST_AVAILABLE = True
-except ImportError:
+except (ImportError, Exception) as e:
     XGBOOST_AVAILABLE = False
-    print("Warning: XGBoost not available. Install with: pip install xgboost")
+    # Only print warning if explicitly trying to use XGBoost
+    # Don't print on import to avoid cluttering output
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -260,7 +261,8 @@ class BaselineTrainer:
     ) -> Optional[Dict]:
         """Train XGBoost model."""
         if not XGBOOST_AVAILABLE:
-            logger.warning("XGBoost not available. Skipping.")
+            logger.warning("XGBoost not available. Install with: pip install xgboost")
+            logger.warning("On macOS, you may also need: brew install libomp")
             return None
         
         logger.info(f"Training XGBoost ({task})...")
