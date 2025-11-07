@@ -131,6 +131,8 @@ jobs:
           HOST_IP: ${{ secrets.HOST_IP }}
           SSH_USER: ${{ secrets.SSH_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          REPO_URL: https://github.com/${{ github.repository }}.git
+          TARGET_BRANCH: main
         run: |
           # Verify SSH connection first
           ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 $SSH_USER@$HOST_IP "echo 'SSH connection successful'" || {
@@ -141,14 +143,32 @@ jobs:
             exit 1
           }
           
-          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP << 'ENDSSH'
+          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP "REPO_URL=$REPO_URL DEPLOY_PATH=$DEPLOY_PATH TARGET_BRANCH=$TARGET_BRANCH bash -s" <<'ENDSSH'
             set -e
-            cd $DEPLOY_PATH || exit 1
             
-            # Pull latest changes
-            echo "Pulling latest changes..."
-            git fetch origin
-            git reset --hard origin/main
+            if [ -z "$REPO_URL" ] || [ -z "$DEPLOY_PATH" ]; then
+              echo "❌ Error: REPO_URL or DEPLOY_PATH not provided"
+              exit 1
+            fi
+            
+            echo "Repository URL: $REPO_URL"
+            echo "Deployment path: $DEPLOY_PATH"
+            
+            if [ ! -d "$DEPLOY_PATH/.git" ]; then
+              echo "🔄 Repository not found at $DEPLOY_PATH. Cloning..."
+              if [ -d "$DEPLOY_PATH" ] && [ "$(ls -A "$DEPLOY_PATH" 2>/dev/null)" ]; then
+                BACKUP_PATH="${DEPLOY_PATH}_backup_$(date +%Y%m%d_%H%M%S)"
+                echo "⚠️  Directory $DEPLOY_PATH is not empty. Moving existing contents to $BACKUP_PATH"
+                mv "$DEPLOY_PATH" "$BACKUP_PATH"
+              fi
+              git clone "$REPO_URL" "$DEPLOY_PATH"
+            fi
+
+            cd "$DEPLOY_PATH"
+            git config --global --add safe.directory "$DEPLOY_PATH" || true
+            git fetch origin --prune
+            git checkout "$TARGET_BRANCH"
+            git reset --hard "origin/$TARGET_BRANCH"
             
             # Activate virtual environment
             if [ ! -d "venv" ]; then
@@ -178,7 +198,7 @@ jobs:
             # Check service status
             sudo systemctl status oi-tracker --no-pager || true
             
-            echo "Deployment completed successfully!"
+            echo "✅ Deployment completed successfully!"
           ENDSSH
 
       - name: Verify deployment

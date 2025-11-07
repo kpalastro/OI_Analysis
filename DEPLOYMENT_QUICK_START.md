@@ -12,6 +12,7 @@ ssh user@aiagents4biz.in
 git clone https://github.com/kpalastro/OI_Analysis.git /var/www/oi-tracker
 # OR if SSH is configured:
 # git clone git@github.com:kpalastro/OI_Analysis.git /var/www/oi-tracker
+# (Optional) If you skip this step, the CI/CD pipeline will attempt to clone the repo automatically.
 
 # Run setup script
 cd /var/www/oi-tracker

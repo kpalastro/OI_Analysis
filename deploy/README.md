@@ -28,6 +28,8 @@ chmod +x deploy/setup_server.sh
 sudo ./deploy/setup_server.sh
 ```
 
+> **Note:** If the repository is not present at deployment time, the CI/CD pipeline will automatically clone it on the server (existing contents will be backed up).
+
 This script will:
 - Install system dependencies (Python, Nginx, etc.)
 - Create deployment directory
