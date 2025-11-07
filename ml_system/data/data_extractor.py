@@ -70,7 +70,9 @@ class DataExtractor:
         end_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(end_date, datetime) else str(end_date)
         
         query = """
-            SELECT timestamp, exchange, strike, option_type, symbol, oi, ltp, token
+            SELECT timestamp, exchange, strike, option_type, symbol, oi, ltp, token,
+                   underlying_price, moneyness, pct_change_5m, pct_change_10m, 
+                   pct_change_15m, pct_change_30m
             FROM option_chain_snapshots
             WHERE exchange = ?
             AND timestamp >= ?
@@ -95,8 +97,8 @@ class DataExtractor:
         end_date: Optional[datetime] = None
     ) -> pd.DataFrame:
         """
-        Extract underlying price history by inferring from ATM strikes in option chain snapshots.
-        Since ATM strike is calculated from underlying price, we can use it as a proxy.
+        Extract underlying price history from option chain snapshots.
+        Uses the underlying_price column directly if available, otherwise infers from ATM strikes.
         
         Args:
             exchange: 'NSE' or 'BSE'
@@ -118,8 +120,41 @@ class DataExtractor:
         start_str = start_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(start_date, datetime) else str(start_date)
         end_str = end_date.strftime('%Y-%m-%d %H:%M:%S') if isinstance(end_date, datetime) else str(end_date)
         
-        # Get strike distribution per timestamp to infer ATM
-        # ATM is typically the strike with the highest combined OI or the middle strike
+        # Try to get underlying_price directly from database (new schema)
+        query = """
+            SELECT DISTINCT
+                timestamp,
+                underlying_price,
+                strike
+            FROM option_chain_snapshots
+            WHERE exchange = ?
+            AND timestamp >= ?
+            AND timestamp <= ?
+            AND underlying_price IS NOT NULL
+            AND moneyness = 'ATM'
+            ORDER BY timestamp ASC
+        """
+        
+        prices_df = pd.read_sql_query(
+            query,
+            self.conn,
+            params=(exchange, start_str, end_str),
+            parse_dates=['timestamp']
+        )
+        
+        if not prices_df.empty:
+            # Group by timestamp and take median underlying_price (in case of duplicates)
+            prices_df = prices_df.groupby('timestamp').agg({
+                'underlying_price': 'median',
+                'strike': 'first'  # ATM strike
+            }).reset_index()
+            prices_df.columns = ['timestamp', 'underlying_price', 'atm_strike']
+            logger.info(f"Extracted {len(prices_df)} underlying price records for {exchange}")
+            return prices_df
+        
+        # Fallback: Infer from strike distribution (old method for backward compatibility)
+        logger.warning(f"No underlying_price data found for {exchange}, inferring from strikes...")
+        
         query = """
             SELECT 
                 timestamp,

@@ -25,7 +25,7 @@ def initialize_database():
         conn = get_db_connection()
         cursor = conn.cursor()
         
-        # Table for option chain snapshots
+        # Table for option chain snapshots (Complete schema per FINAL_SCHEMA_SUMMARY.md)
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS option_chain_snapshots (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -37,9 +37,42 @@ def initialize_database():
                 oi INTEGER,
                 ltp REAL,
                 token INTEGER NOT NULL,
+                underlying_price REAL,
+                moneyness TEXT,
+                pct_change_5m REAL,
+                pct_change_10m REAL,
+                pct_change_15m REAL,
+                pct_change_30m REAL,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+        
+        # Try to add columns if they don't exist (for existing databases)
+        try:
+            cursor.execute("PRAGMA table_info(option_chain_snapshots)")
+            columns = [row[1] for row in cursor.fetchall()]
+            
+            new_columns = {
+                'underlying_price': 'REAL',
+                'moneyness': 'TEXT',
+                'pct_change_5m': 'REAL',
+                'pct_change_10m': 'REAL',
+                'pct_change_15m': 'REAL',
+                'pct_change_30m': 'REAL'
+            }
+            
+            for column_name, column_type in new_columns.items():
+                if column_name not in columns:
+                    try:
+                        cursor.execute(f'''
+                            ALTER TABLE option_chain_snapshots 
+                            ADD COLUMN {column_name} {column_type}
+                        ''')
+                        logging.info(f"✓ Added column: {column_name}")
+                    except sqlite3.OperationalError:
+                        pass  # Column might already exist
+        except Exception as e:
+            logging.warning(f"Could not check/add columns: {e}")
         
         # Index for faster queries
         cursor.execute('''
@@ -50,6 +83,17 @@ def initialize_database():
         cursor.execute('''
             CREATE INDEX IF NOT EXISTS idx_snapshots_token 
             ON option_chain_snapshots(token)
+        ''')
+        
+        # Indexes for new columns
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_snapshots_moneyness 
+            ON option_chain_snapshots(exchange, moneyness, timestamp)
+        ''')
+        
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_snapshots_underlying_price 
+            ON option_chain_snapshots(exchange, timestamp, underlying_price)
         ''')
         
         # Table for exchange metadata (track last update times and underlying prices)
@@ -67,14 +111,59 @@ def initialize_database():
         conn.close()
         logging.info(f"✓ Database initialized: {DB_FILE}")
 
+def calculate_moneyness(strike, option_type, underlying_price, atm_strike):
+    """
+    Calculate moneyness (ITM/ATM/OTM) for an option.
+    
+    Args:
+        strike: Strike price
+        option_type: 'CE' or 'PE'
+        underlying_price: Current underlying price
+        atm_strike: Current ATM strike
+        
+    Returns:
+        'ITM', 'ATM', or 'OTM'
+    """
+    if atm_strike is not None and strike == atm_strike:
+        return 'ATM'
+    
+    if option_type == 'CE':
+        # For CALL options
+        if underlying_price is not None:
+            if strike < underlying_price:
+                return 'ITM'
+            elif strike > underlying_price:
+                return 'OTM'
+        # Fallback to ATM strike comparison
+        if atm_strike is not None:
+            if strike < atm_strike:
+                return 'ITM'
+            elif strike > atm_strike:
+                return 'OTM'
+    else:  # PE
+        # For PUT options
+        if underlying_price is not None:
+            if strike > underlying_price:
+                return 'ITM'
+            elif strike < underlying_price:
+                return 'OTM'
+        # Fallback to ATM strike comparison
+        if atm_strike is not None:
+            if strike > atm_strike:
+                return 'ITM'
+            elif strike < atm_strike:
+                return 'OTM'
+    
+    return 'ATM'  # Default
+
 def save_option_chain_snapshot(exchange, call_options, put_options, underlying_price=None, atm_strike=None, timestamp=None):
     """
-    Save complete option chain snapshot to database including underlying price.
+    Save complete option chain snapshot to database with all fields per FINAL_SCHEMA_SUMMARY.md.
     
     Args:
         exchange: 'NSE' or 'BSE'
-        call_options: List of call option dicts with strike, symbol, latest_oi, ltp, token
-        put_options: List of put option dicts with strike, symbol, latest_oi, ltp, token
+        call_options: List of call option dicts with strike, symbol, latest_oi, ltp, token, pct_changes
+        put_options: List of put option dicts with strike, symbol, latest_oi, ltp, token, pct_changes
         underlying_price: Current price of underlying (NIFTY/SENSEX)
         atm_strike: Current ATM strike
         timestamp: datetime object (defaults to now)
@@ -93,37 +182,75 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
             # Add call options
             for opt in call_options:
                 if 'token' in opt and opt.get('symbol'):
+                    strike = opt.get('strike')
+                    pct_changes = opt.get('pct_changes', {})
+                    
+                    # Calculate moneyness
+                    moneyness = calculate_moneyness(strike, 'CE', underlying_price, atm_strike)
+                    
+                    # Extract percentage changes
+                    pct_5m = pct_changes.get('5m')
+                    pct_10m = pct_changes.get('10m')
+                    pct_15m = pct_changes.get('15m')
+                    pct_30m = pct_changes.get('30m')
+                    
                     records.append((
                         timestamp,
                         exchange,
-                        opt.get('strike'),
+                        strike,
                         'CE',
                         opt.get('symbol'),
                         opt.get('latest_oi'),
                         opt.get('ltp'),
-                        opt.get('token')
+                        opt.get('token'),
+                        underlying_price,
+                        moneyness,
+                        pct_5m,
+                        pct_10m,
+                        pct_15m,
+                        pct_30m
                     ))
             
             # Add put options
             for opt in put_options:
                 if 'token' in opt and opt.get('symbol'):
+                    strike = opt.get('strike')
+                    pct_changes = opt.get('pct_changes', {})
+                    
+                    # Calculate moneyness
+                    moneyness = calculate_moneyness(strike, 'PE', underlying_price, atm_strike)
+                    
+                    # Extract percentage changes
+                    pct_5m = pct_changes.get('5m')
+                    pct_10m = pct_changes.get('10m')
+                    pct_15m = pct_changes.get('15m')
+                    pct_30m = pct_changes.get('30m')
+                    
                     records.append((
                         timestamp,
                         exchange,
-                        opt.get('strike'),
+                        strike,
                         'PE',
                         opt.get('symbol'),
                         opt.get('latest_oi'),
                         opt.get('ltp'),
-                        opt.get('token')
+                        opt.get('token'),
+                        underlying_price,
+                        moneyness,
+                        pct_5m,
+                        pct_10m,
+                        pct_15m,
+                        pct_30m
                     ))
             
-            # Bulk insert
+            # Bulk insert with all columns
             if records:
                 cursor.executemany('''
                     INSERT INTO option_chain_snapshots 
-                    (timestamp, exchange, strike, option_type, symbol, oi, ltp, token)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    (timestamp, exchange, strike, option_type, symbol, oi, ltp, token,
+                     underlying_price, moneyness, pct_change_5m, pct_change_10m, 
+                     pct_change_15m, pct_change_30m)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', records)
                 
                 # Update exchange metadata with underlying price
