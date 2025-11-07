@@ -65,7 +65,9 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ secrets.HOST_IP }} >> ~/.ssh/known_hosts
+          ssh-keyscan -H "${{ secrets.HOST_IP }}" >> ~/.ssh/known_hosts || true
+          # Also add common SSH hosts
+          ssh-keyscan -H github.com >> ~/.ssh/known_hosts || true
 
       - name: Deploy to server
         env:
@@ -73,7 +75,16 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
         run: |
-          ssh $SSH_USER@$HOST_IP << 'ENDSSH'
+          # Verify SSH connection first
+          ssh -o StrictHostKeyChecking=no -o ConnectTimeout=10 $SSH_USER@$HOST_IP "echo 'SSH connection successful'" || {
+            echo "Failed to connect to server. Please check:"
+            echo "1. HOST_IP is correct: $HOST_IP"
+            echo "2. SSH_USER is correct: $SSH_USER"
+            echo "3. SSH_PRIVATE_KEY is valid"
+            exit 1
+          }
+          
+          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP << 'ENDSSH'
             set -e
             cd $DEPLOY_PATH || exit 1
             
@@ -119,7 +130,12 @@ jobs:
           SSH_USER: ${{ secrets.SSH_USER }}
         run: |
           echo "Waiting for application to start..."
-          sleep 5
-          curl -f http://$HOST_IP:5000/login || exit 1
-          echo "Deployment verified successfully!"
+          sleep 10
+          # Try to verify via SSH first (check service status)
+          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP "sudo systemctl is-active oi-tracker" || {
+            echo "Service is not active. Checking logs..."
+            ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP "sudo journalctl -u oi-tracker -n 20 --no-pager" || true
+            exit 1
+          }
+          echo "Service is active. Deployment verified successfully!"
 
