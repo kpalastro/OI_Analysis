@@ -10,8 +10,9 @@ import atexit
 import os
 from datetime import datetime, date, timedelta, timezone
 from threading import Thread, Lock
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect, url_for
 from flask_socketio import SocketIO, emit
+from functools import wraps
 from kite_trade import *
 from kiteconnect import KiteTicker
 import database as db
@@ -36,21 +37,11 @@ load_dotenv()
 # --- CONFIGURATION ---
 # ==============================================================================
 
-# --- Login Credentials (loaded from environment variables) ---
-USER_ID = os.getenv('ZERODHA_USER_ID')
-PASSWORD = os.getenv('ZERODHA_PASSWORD')
-
-# Validate credentials are loaded
-if not USER_ID or not PASSWORD:
-    print("=" * 70)
-    print("ERROR: Credentials not found!")
-    print("=" * 70)
-    print("\nPlease ensure you have created a .env file with:")
-    print("  ZERODHA_USER_ID=your_client_id")
-    print("  ZERODHA_PASSWORD=your_password")
-    print("\nYou can copy .env.example to .env and fill in your details.")
-    print("=" * 70)
-    sys.exit(1)
+# --- Login Credentials (optional - can be entered via login UI) ---
+# Note: Credentials can be loaded from .env for convenience, but are not required at startup
+# Users can also enter them directly in the login UI
+USER_ID = os.getenv('ZERODHA_USER_ID', '')
+PASSWORD = os.getenv('ZERODHA_PASSWORD', '')
 
 # TWOFA will be requested at runtime via user input
 
@@ -213,8 +204,12 @@ closed_positions_pnl = {
 
 # Flask app
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-here')
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-change-in-production')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Authentication state
+authenticated = False
+current_enctoken = None
 
 # ==============================================================================
 # --- CORE FUNCTIONS (from original script) ---
@@ -938,9 +933,102 @@ def run_data_update_loop_exchange(exchange):
 # --- FLASK ROUTES ---
 # ==============================================================================
 
+def login_required(f):
+    """Decorator to require authentication."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        global authenticated
+        if not authenticated:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/login')
+def login():
+    """Login page route."""
+    global authenticated, USER_ID
+    if authenticated:
+        return redirect(url_for('index'))
+    # Pass USER_ID from .env if available (for convenience, but user can override)
+    return render_template('login.html', default_user_id=USER_ID if USER_ID else '')
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    """API endpoint for login authentication."""
+    global authenticated, kite, current_enctoken
+    
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id', '').strip()
+        password = data.get('password', '').strip()
+        twofa = data.get('twofa', '').strip()
+        
+        if not user_id or not password or not twofa:
+            return jsonify({'success': False, 'error': 'All fields are required'}), 400
+        
+        if len(twofa) != 6 or not twofa.isdigit():
+            return jsonify({'success': False, 'error': '2FA code must be a 6-digit number'}), 400
+        
+        # Authenticate with Zerodha
+        try:
+            enctoken = get_enctoken(user_id, password, twofa)
+            if not enctoken:
+                return jsonify({'success': False, 'error': 'Invalid credentials or 2FA code'}), 401
+            
+            # Initialize KiteApp
+            kite_instance = KiteApp(enctoken=enctoken)
+            
+            # Verify connection
+            profile = kite_instance.profile()
+            
+            # Store authentication state
+            authenticated = True
+            current_enctoken = enctoken
+            kite = kite_instance
+            
+            # Start initialization in background
+            Thread(target=initialize_system_async, daemon=True).start()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Authenticated as {profile.get("user_id")}',
+                'user_id': profile.get('user_id'),
+                'user_name': profile.get('user_name')
+            })
+        
+        except Exception as e:
+            logging.error(f"Login error: {e}", exc_info=True)
+            return jsonify({'success': False, 'error': f'Authentication failed: {str(e)}'}), 401
+    
+    except Exception as e:
+        logging.error(f"Login API error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': 'Server error during login'}), 500
+
+@app.route('/api/logout', methods=['POST'])
+def api_logout():
+    """API endpoint for logout."""
+    global authenticated, kite, current_enctoken, kws
+    
+    authenticated = False
+    current_enctoken = None
+    kite = None
+    
+    # Close WebSocket connections
+    if kws:
+        try:
+            kws.close()
+        except:
+            pass
+        kws = None
+    
+    return jsonify({'success': True, 'message': 'Logged out successfully'})
+
 @app.route('/')
+@login_required
 def index():
     """Main page route - now supports dual exchange tabs."""
+    if not authenticated:
+        return redirect(url_for('login'))
     return render_template('index.html', 
                           exchanges=['NSE', 'BSE'],
                           exchange_configs=EXCHANGE_CONFIGS,
@@ -948,6 +1036,7 @@ def index():
                           thresholds=PCT_CHANGE_THRESHOLDS)
 
 @app.route('/backtest')
+@login_required
 def backtest_page():
     """Backtesting page route."""
     return render_template('backtest.html',
@@ -1331,325 +1420,320 @@ signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
 # --- MAIN INITIALIZATION ---
 # ==============================================================================
 
-def initialize_system():
-    """Initialize the trading system with dual exchange support and start background threads."""
+def initialize_system_async():
+    """Initialize the trading system asynchronously after login."""
     global kite, kws, exchange_instruments, latest_oi_data, oi_history
     global ml_predictor, ml_signal_generator, ml_feature_engineer, ml_models_loaded
     
-    print("=" * 70)
-    print("DUAL EXCHANGE OI TRACKER - NSE (NIFTY) & BSE (SENSEX)")
-    print("=" * 70)
-    print("\n🔒 Credentials loaded from environment variables (.env file)")
+    if not kite:
+        logging.error("Kite instance not available for initialization")
+        return
     
-    # Get 2FA input
-    print(f"\nLogin ID: {USER_ID}")
-    twofa_input = input("Enter your 2FA PIN or TOTP code: ").strip()
-    if not twofa_input:
-        print("2FA code is required. Exiting.")
-        sys.exit(1)
-    
-    # Get enctoken
-    print("\nAuthenticating with Zerodha...")
-    enctoken = get_enctoken(USER_ID, PASSWORD, twofa_input)
-    if not enctoken:
-        print("Failed to get enctoken. Check your credentials.")
-        sys.exit(1)
-    
-    print("✓ Successfully obtained enctoken!")
-    
-    # Initialize KiteApp
-    kite = KiteApp(enctoken=enctoken)
-    print("✓ KiteApp initialized!")
-    
-    # Verify connection
-    profile = kite.profile()
-    print(f"✓ Connected as: {profile.get('user_id')} ({profile.get('user_name')})")
-    
-    # ==== NSE/NIFTY Instruments ====
-    print("\n" + "=" * 70)
-    print("FETCHING NSE/NIFTY INSTRUMENTS")
-    print("=" * 70)
-    
-    print("Fetching NFO (NIFTY Options) instruments...")
-    nfo_instruments = kite.instruments('NFO')
-    if not nfo_instruments:
-        print("Failed to fetch NFO instruments. Exiting.")
-        sys.exit(1)
-    print(f"✓ Fetched {len(nfo_instruments)} NFO instruments")
-    
-    print("Fetching NSE instruments...")
-    nse_instruments = kite.instruments('NSE')
-    if not nse_instruments:
-        print("Failed to fetch NSE instruments. Exiting.")
-        sys.exit(1)
-    print(f"✓ Fetched {len(nse_instruments)} NSE instruments")
-    
-    # Get NIFTY underlying token
-    nifty_config = EXCHANGE_CONFIGS['NSE']
-    nifty_token = get_instrument_token_for_symbol(
-        nse_instruments, 
-        nifty_config['underlying_symbol'], 
-        nifty_config['ltp_exchange']
-    )
-    if not nifty_token:
-        print(f"Could not find token for {nifty_config['underlying_symbol']}. Exiting.")
-        sys.exit(1)
-    print(f"✓ Found NIFTY token: {nifty_token}")
-    
-    # Get NIFTY nearest expiry
-    nifty_expiry_info = get_nearest_weekly_expiry(
-        nfo_instruments, 
-        nifty_config['underlying_prefix'],
-        nifty_config['options_exchange']
-    )
-    if not nifty_expiry_info:
-        print(f"Could not determine nearest expiry for NIFTY. Exiting.")
-        sys.exit(1)
-    print(f"✓ NIFTY expiry: {nifty_expiry_info['expiry'].strftime('%d-%b-%Y')}")
-    
-    # Store NSE data
-    exchange_instruments['NSE']['underlying_token'] = nifty_token
-    exchange_instruments['NSE']['nfo_instruments'] = nfo_instruments
-    exchange_instruments['NSE']['expiry_date'] = nifty_expiry_info['expiry']
-    exchange_instruments['NSE']['symbol_prefix'] = nifty_expiry_info['symbol_prefix']
-    
-    # ==== BSE/SENSEX Instruments ====
-    print("\n" + "=" * 70)
-    print("FETCHING BSE/SENSEX INSTRUMENTS")
-    print("=" * 70)
-    
-    print("Fetching BFO (SENSEX Options) instruments...")
-    bfo_instruments = kite.instruments('BFO')
-    if not bfo_instruments:
-        print("Failed to fetch BFO instruments. Exiting.")
-        sys.exit(1)
-    print(f"✓ Fetched {len(bfo_instruments)} BFO instruments")
-    
-    print("Fetching BSE instruments...")
-    bse_instruments = kite.instruments('BSE')
-    if not bse_instruments:
-        print("Failed to fetch BSE instruments. Exiting.")
-        sys.exit(1)
-    print(f"✓ Fetched {len(bse_instruments)} BSE instruments")
-    
-    # Get SENSEX underlying token
-    sensex_config = EXCHANGE_CONFIGS['BSE']
-    sensex_token = get_instrument_token_for_symbol(
-        bse_instruments, 
-        sensex_config['underlying_symbol'], 
-        sensex_config['ltp_exchange']
-    )
-    if not sensex_token:
-        print(f"Could not find token for {sensex_config['underlying_symbol']}. Exiting.")
-        sys.exit(1)
-    print(f"✓ Found SENSEX token: {sensex_token}")
-    
-    # Get SENSEX nearest expiry
-    sensex_expiry_info = get_nearest_weekly_expiry(
-        bfo_instruments, 
-        sensex_config['underlying_prefix'],
-        sensex_config['options_exchange']
-    )
-    if not sensex_expiry_info:
-        print(f"Could not determine nearest expiry for SENSEX. Exiting.")
-        sys.exit(1)
-    print(f"✓ SENSEX expiry: {sensex_expiry_info['expiry'].strftime('%d-%b-%Y')}")
-    
-    # Store BSE data
-    exchange_instruments['BSE']['underlying_token'] = sensex_token
-    exchange_instruments['BSE']['bfo_instruments'] = bfo_instruments
-    exchange_instruments['BSE']['expiry_date'] = sensex_expiry_info['expiry']
-    exchange_instruments['BSE']['symbol_prefix'] = sensex_expiry_info['symbol_prefix']
-    
-    # ==== Database Integration ====
-    print("\n" + "=" * 70)
-    print("CHECKING DATABASE FOR HISTORICAL DATA")
-    print("=" * 70)
-    
-    # Check if we should load from database for each exchange
-    for exchange in ['NSE', 'BSE']:
-        if db.should_load_from_db(exchange):
-            print(f"✓ {exchange}: Loading historical data from database...")
-            oi_history[exchange] = db.load_today_snapshots(exchange)
-            print(f"  Loaded {sum(len(v) for v in oi_history[exchange].values())} records")
-        else:
-            print(f"✓ {exchange}: Starting fresh (no recent data or gap > 30 min)")
-    
-    # Cleanup old data (30+ days)
-    db.cleanup_old_data(days_to_keep=30)
-    
-    
-    # ==== WebSocket Setup ====
-    print("\n" + "=" * 70)
-    print("SETTING UP WEBSOCKET CONNECTION")
-    print("=" * 70)
-    
-    user_id = profile.get('user_id')
-    kws = KiteTicker(api_key="TradeViaPython", access_token=enctoken+"&user_id="+user_id)
-    
-    def on_ticks(ws, ticks):
-        """Handle incoming tick data for both exchanges."""
-        global latest_tick_data, oi_history
-        current_time = datetime.now()  # Use timezone-naive for consistency with historical API
+    try:
+        logging.info("=" * 70)
+        logging.info("DUAL EXCHANGE OI TRACKER - NSE (NIFTY) & BSE (SENSEX)")
+        logging.info("=" * 70)
         
-        for tick in ticks:
-            instrument_token = tick.get('instrument_token')
-            if not instrument_token:
-                continue
-            
-            # Determine which exchange this token belongs to
-            exchange = None
-            if instrument_token == exchange_instruments['NSE']['underlying_token']:
-                exchange = 'NSE'
-            elif instrument_token == exchange_instruments['BSE']['underlying_token']:
-                exchange = 'BSE'
-            elif instrument_token in exchange_instruments['NSE'].get('option_tokens', []):
-                exchange = 'NSE'
-            elif instrument_token in exchange_instruments['BSE'].get('option_tokens', []):
-                exchange = 'BSE'
+        # Verify connection
+        profile = kite.profile()
+        logging.info(f"✓ Connected as: {profile.get('user_id')} ({profile.get('user_name')})")
+        
+        # ==== NSE/NIFTY Instruments ====
+        logging.info("\n" + "=" * 70)
+        logging.info("FETCHING NSE/NIFTY INSTRUMENTS")
+        logging.info("=" * 70)
+        
+        logging.info("Fetching NFO (NIFTY Options) instruments...")
+        nfo_instruments = kite.instruments('NFO')
+        if not nfo_instruments:
+            logging.error("Failed to fetch NFO instruments.")
+            return
+        logging.info(f"✓ Fetched {len(nfo_instruments)} NFO instruments")
+        
+        logging.info("Fetching NSE instruments...")
+        nse_instruments = kite.instruments('NSE')
+        if not nse_instruments:
+            logging.error("Failed to fetch NSE instruments.")
+            return
+        logging.info(f"✓ Fetched {len(nse_instruments)} NSE instruments")
+        
+        # Get NIFTY underlying token
+        nifty_config = EXCHANGE_CONFIGS['NSE']
+        nifty_token = get_instrument_token_for_symbol(
+            nse_instruments, 
+            nifty_config['underlying_symbol'], 
+            nifty_config['ltp_exchange']
+        )
+        if not nifty_token:
+            logging.error(f"Could not find token for {nifty_config['underlying_symbol']}.")
+            return
+        logging.info(f"✓ Found NIFTY token: {nifty_token}")
+        
+        # Get NIFTY nearest expiry
+        nifty_expiry_info = get_nearest_weekly_expiry(
+            nfo_instruments, 
+            nifty_config['underlying_prefix'],
+            nifty_config['options_exchange']
+        )
+        if not nifty_expiry_info:
+            logging.error(f"Could not determine nearest expiry for NIFTY.")
+            return
+        logging.info(f"✓ NIFTY expiry: {nifty_expiry_info['expiry'].strftime('%d-%b-%Y')}")
+    
+        # Store NSE data
+        exchange_instruments['NSE']['underlying_token'] = nifty_token
+        exchange_instruments['NSE']['nfo_instruments'] = nfo_instruments
+        exchange_instruments['NSE']['expiry_date'] = nifty_expiry_info['expiry']
+        exchange_instruments['NSE']['symbol_prefix'] = nifty_expiry_info['symbol_prefix']
+        
+        # ==== BSE/SENSEX Instruments ====
+        logging.info("\n" + "=" * 70)
+        logging.info("FETCHING BSE/SENSEX INSTRUMENTS")
+        logging.info("=" * 70)
+        
+        logging.info("Fetching BFO (SENSEX Options) instruments...")
+        bfo_instruments = kite.instruments('BFO')
+        if not bfo_instruments:
+            logging.error("Failed to fetch BFO instruments.")
+            return
+        logging.info(f"✓ Fetched {len(bfo_instruments)} BFO instruments")
+        
+        logging.info("Fetching BSE instruments...")
+        bse_instruments = kite.instruments('BSE')
+        if not bse_instruments:
+            logging.error("Failed to fetch BSE instruments.")
+            return
+        logging.info(f"✓ Fetched {len(bse_instruments)} BSE instruments")
+        
+        # Get SENSEX underlying token
+        sensex_config = EXCHANGE_CONFIGS['BSE']
+        sensex_token = get_instrument_token_for_symbol(
+            bse_instruments, 
+            sensex_config['underlying_symbol'], 
+            sensex_config['ltp_exchange']
+        )
+        if not sensex_token:
+            logging.error(f"Could not find token for {sensex_config['underlying_symbol']}.")
+            return
+        logging.info(f"✓ Found SENSEX token: {sensex_token}")
+        
+        # Get SENSEX nearest expiry
+        sensex_expiry_info = get_nearest_weekly_expiry(
+            bfo_instruments, 
+            sensex_config['underlying_prefix'],
+            sensex_config['options_exchange']
+        )
+        if not sensex_expiry_info:
+            logging.error(f"Could not determine nearest expiry for SENSEX.")
+            return
+        logging.info(f"✓ SENSEX expiry: {sensex_expiry_info['expiry'].strftime('%d-%b-%Y')}")
+    
+        # Store BSE data
+        exchange_instruments['BSE']['underlying_token'] = sensex_token
+        exchange_instruments['BSE']['bfo_instruments'] = bfo_instruments
+        exchange_instruments['BSE']['expiry_date'] = sensex_expiry_info['expiry']
+        exchange_instruments['BSE']['symbol_prefix'] = sensex_expiry_info['symbol_prefix']
+        
+        # ==== Database Integration ====
+        logging.info("\n" + "=" * 70)
+        logging.info("CHECKING DATABASE FOR HISTORICAL DATA")
+        logging.info("=" * 70)
+        
+        # Check if we should load from database for each exchange
+        for exchange in ['NSE', 'BSE']:
+            if db.should_load_from_db(exchange):
+                logging.info(f"✓ {exchange}: Loading historical data from database...")
+                oi_history[exchange] = db.load_today_snapshots(exchange)
+                logging.info(f"  Loaded {sum(len(v) for v in oi_history[exchange].values())} records")
             else:
-                # Try to identify by checking both token lists
-                for exch in ['NSE', 'BSE']:
-                    if instrument_token in exchange_instruments[exch].get('option_tokens', []):
-                        exchange = exch
-                        break
-                
-                # If still not found, log and skip (don't default to NSE)
-                if exchange is None:
-                    logging.debug(f"Received tick for uncategorized token {instrument_token}")
+                logging.info(f"✓ {exchange}: Starting fresh (no recent data or gap > 30 min)")
+        
+        # Cleanup old data (30+ days)
+        db.cleanup_old_data(days_to_keep=30)
+        
+        
+        # ==== WebSocket Setup ====
+        logging.info("\n" + "=" * 70)
+        logging.info("SETTING UP WEBSOCKET CONNECTION")
+        logging.info("=" * 70)
+        
+        user_id = profile.get('user_id')
+        global current_enctoken
+        kws_instance = KiteTicker(api_key="TradeViaPython", access_token=current_enctoken+"&user_id="+user_id)
+        global kws
+        kws = kws_instance
+        
+        def on_ticks(ws, ticks):
+            """Handle incoming tick data for both exchanges."""
+            global latest_tick_data, oi_history
+            current_time = datetime.now()  # Use timezone-naive for consistency with historical API
+            
+            for tick in ticks:
+                instrument_token = tick.get('instrument_token')
+                if not instrument_token:
                     continue
+                
+                # Determine which exchange this token belongs to
+                exchange = None
+                if instrument_token == exchange_instruments['NSE']['underlying_token']:
+                    exchange = 'NSE'
+                elif instrument_token == exchange_instruments['BSE']['underlying_token']:
+                    exchange = 'BSE'
+                elif instrument_token in exchange_instruments['NSE'].get('option_tokens', []):
+                    exchange = 'NSE'
+                elif instrument_token in exchange_instruments['BSE'].get('option_tokens', []):
+                    exchange = 'BSE'
+                else:
+                    # Try to identify by checking both token lists
+                    for exch in ['NSE', 'BSE']:
+                        if instrument_token in exchange_instruments[exch].get('option_tokens', []):
+                            exchange = exch
+                            break
+                    
+                    # If still not found, log and skip (don't default to NSE)
+                    if exchange is None:
+                        logging.debug(f"Received tick for uncategorized token {instrument_token}")
+                        continue
+                
+                # Store tick data
+                latest_tick_data[exchange][instrument_token] = tick
+                
+                # Store OI history if available (MODE_FULL provides OI)
+                if 'oi' in tick and tick['oi'] is not None:
+                    if instrument_token not in oi_history[exchange]:
+                        oi_history[exchange][instrument_token] = []
+                    
+                    # Add new OI record with timestamp
+                    oi_history[exchange][instrument_token].append({
+                        'date': current_time,
+                        'oi': tick['oi']
+                    })
+                    
+                    # Keep only last 60 minutes of OI history
+                    cutoff_time = current_time - timedelta(minutes=60)
+                    oi_history[exchange][instrument_token] = [
+                        record for record in oi_history[exchange][instrument_token]
+                        if record['date'] > cutoff_time
+                    ]
+                    
+                    # Log first few OI entries to verify data accumulation
+                    if len(oi_history[exchange][instrument_token]) <= 3:
+                        logging.info(f"{exchange}: Accumulating OI for token {instrument_token}: {len(oi_history[exchange][instrument_token])} records")
+    
+        def on_connect(ws, response):
+            """Subscribe to both NIFTY and SENSEX underlying tokens on connection."""
+            global ws_connected
+            ws_connected = True
+            logging.info("✓ WebSocket connected!")
             
-            # Store tick data
-            latest_tick_data[exchange][instrument_token] = tick
+            # Subscribe to both underlying tokens
+            nifty_token = exchange_instruments['NSE']['underlying_token']
+            sensex_token = exchange_instruments['BSE']['underlying_token']
             
-            # Store OI history if available (MODE_FULL provides OI)
-            if 'oi' in tick and tick['oi'] is not None:
-                if instrument_token not in oi_history[exchange]:
-                    oi_history[exchange][instrument_token] = []
-                
-                # Add new OI record with timestamp
-                oi_history[exchange][instrument_token].append({
-                    'date': current_time,
-                    'oi': tick['oi']
-                })
-                
-                # Keep only last 60 minutes of OI history
-                cutoff_time = current_time - timedelta(minutes=60)
-                oi_history[exchange][instrument_token] = [
-                    record for record in oi_history[exchange][instrument_token]
-                    if record['date'] > cutoff_time
-                ]
-                
-                # Log first few OI entries to verify data accumulation
-                if len(oi_history[exchange][instrument_token]) <= 3:
-                    logging.info(f"{exchange}: Accumulating OI for token {instrument_token}: {len(oi_history[exchange][instrument_token])} records")
-    
-    def on_connect(ws, response):
-        """Subscribe to both NIFTY and SENSEX underlying tokens on connection."""
-        global ws_connected
-        ws_connected = True
-        print("✓ WebSocket connected!")
+            ws.subscribe([nifty_token, sensex_token])
+            ws.set_mode(ws.MODE_QUOTE, [nifty_token, sensex_token])
+            logging.info(f"✓ Subscribed to NIFTY (token: {nifty_token}) and SENSEX (token: {sensex_token})")
         
-        # Subscribe to both underlying tokens
-        nifty_token = exchange_instruments['NSE']['underlying_token']
-        sensex_token = exchange_instruments['BSE']['underlying_token']
+        def on_close(ws, code, reason):
+            global ws_connected
+            ws_connected = False
+            logging.warning(f"⚠ WebSocket closed: {code} - {reason}")
         
-        ws.subscribe([nifty_token, sensex_token])
-        ws.set_mode(ws.MODE_QUOTE, [nifty_token, sensex_token])
-        print(f"✓ Subscribed to NIFTY (token: {nifty_token}) and SENSEX (token: {sensex_token})")
+        def on_error(ws, code, reason):
+            logging.error(f"✗ WebSocket error: {code} - {reason}")
+        
+        kws.on_ticks = on_ticks
+        kws.on_connect = on_connect
+        kws.on_close = on_close
+        kws.on_error = on_error
+        
+        kws.connect(threaded=True)
+        
+        # Wait for WebSocket
+        logging.info("Waiting for WebSocket connection...")
+        wait_count = 0
+        while not kws.is_connected() and wait_count < 10:
+            time.sleep(1)
+            wait_count += 1
+        
+        if not kws.is_connected():
+            logging.error("WebSocket failed to connect.")
+            return
+        
+        logging.info("✓ WebSocket connected successfully!")
+        time.sleep(3)  # Wait for initial tick data
+        
+        # ==== Start Background Data Update Threads ====
+        logging.info("\n" + "=" * 70)
+        logging.info("STARTING BACKGROUND DATA UPDATE THREADS")
+        logging.info("=" * 70)
+        
+        # Start NSE/NIFTY update thread
+        nse_thread = Thread(
+            target=run_data_update_loop_exchange, 
+            args=('NSE',),
+            daemon=True,
+            name='NSE-UpdateThread'
+        )
+        nse_thread.start()
+        logging.info("✓ NSE (NIFTY) update thread started")
+        
+        # Start BSE/SENSEX update thread
+        bse_thread = Thread(
+            target=run_data_update_loop_exchange, 
+            args=('BSE',),
+            daemon=True,
+            name='BSE-UpdateThread'
+        )
+        bse_thread.start()
+        logging.info("✓ BSE (SENSEX) update thread started")
+        
+        # Initialize ML System if available
+        if ML_SYSTEM_AVAILABLE:
+            try:
+                logging.info("\n" + "=" * 70)
+                logging.info("INITIALIZING ML PREDICTION SYSTEM")
+                logging.info("=" * 70)
+                ml_predictor = RealTimePredictor()
+                ml_signal_generator = SignalGenerator()
+                ml_feature_engineer = FeatureEngineer()
+                ml_predictor.load_models()
+                ml_models_loaded = ml_predictor.is_loaded
+                if ml_models_loaded:
+                    logging.info("✓ ML models loaded successfully")
+                else:
+                    logging.warning("⚠️  ML models not found. Train models first using: python3 ml_system/test_phase2.py")
+            except Exception as e:
+                logging.warning(f"ML System initialization failed: {e}")
+                ml_models_loaded = False
+        
+        logging.info("\n" + "=" * 70)
+        logging.info("✓ SYSTEM INITIALIZED SUCCESSFULLY!")
+        logging.info("=" * 70)
+        logging.info(f"📊 Tracking: NIFTY (NSE) and SENSEX (BSE)")
+        logging.info(f"🔄 Refresh interval: {REFRESH_INTERVAL_SECONDS} seconds")
+        if ml_models_loaded:
+            logging.info("🤖 ML Predictions: Enabled")
+        logging.info("💾 Database: Enabled (30-day retention)")
+        logging.info("💰 Underlying prices: Saved with every refresh")
     
-    def on_close(ws, code, reason):
-        global ws_connected
-        ws_connected = False
-        print(f"⚠ WebSocket closed: {code} - {reason}")
-        logging.warning(f"WebSocket closed: {code} - {reason}")
-    
-    def on_error(ws, code, reason):
-        print(f"✗ WebSocket error: {code} - {reason}")
-        logging.error(f"WebSocket error: {code} - {reason}")
-    
-    kws.on_ticks = on_ticks
-    kws.on_connect = on_connect
-    kws.on_close = on_close
-    kws.on_error = on_error
-    
-    kws.connect(threaded=True)
-    
-    # Wait for WebSocket
-    print("Waiting for WebSocket connection...")
-    wait_count = 0
-    while not kws.is_connected() and wait_count < 10:
-        time.sleep(1)
-        wait_count += 1
-    
-    if not kws.is_connected():
-        print("WebSocket failed to connect. Exiting.")
-        sys.exit(1)
-    
-    print("✓ WebSocket connected successfully!")
-    time.sleep(3)  # Wait for initial tick data
-    
-    # ==== Start Background Data Update Threads ====
-    print("\n" + "=" * 70)
-    print("STARTING BACKGROUND DATA UPDATE THREADS")
-    print("=" * 70)
-    
-    # Start NSE/NIFTY update thread
-    nse_thread = Thread(
-        target=run_data_update_loop_exchange, 
-        args=('NSE',),
-        daemon=True,
-        name='NSE-UpdateThread'
-    )
-    nse_thread.start()
-    print("✓ NSE (NIFTY) update thread started")
-    
-    # Start BSE/SENSEX update thread
-    bse_thread = Thread(
-        target=run_data_update_loop_exchange, 
-        args=('BSE',),
-        daemon=True,
-        name='BSE-UpdateThread'
-    )
-    bse_thread.start()
-    print("✓ BSE (SENSEX) update thread started")
-    
-    # Initialize ML System if available
-    if ML_SYSTEM_AVAILABLE:
-        try:
-            print("\n" + "=" * 70)
-            print("INITIALIZING ML PREDICTION SYSTEM")
-            print("=" * 70)
-            ml_predictor = RealTimePredictor()
-            ml_signal_generator = SignalGenerator()
-            ml_feature_engineer = FeatureEngineer()
-            ml_predictor.load_models()
-            ml_models_loaded = ml_predictor.is_loaded
-            if ml_models_loaded:
-                print("✓ ML models loaded successfully")
-            else:
-                print("⚠️  ML models not found. Train models first using: python3 ml_system/test_phase2.py")
-        except Exception as e:
-            logging.warning(f"ML System initialization failed: {e}")
-            ml_models_loaded = False
-    
-    print("\n" + "=" * 70)
-    print("✓ SYSTEM INITIALIZED SUCCESSFULLY!")
-    print("=" * 70)
-    print(f"\n🌐 Web interface will be available at: http://localhost:5000")
-    print("📊 Tracking: NIFTY (NSE) and SENSEX (BSE)")
-    print(f"🔄 Refresh interval: {REFRESH_INTERVAL_SECONDS} seconds")
-    if ml_models_loaded:
-        print("🤖 ML Predictions: Enabled")
-    print("💾 Database: Enabled (30-day retention)")
-    print("💰 Underlying prices: Saved with every refresh")
-    print("\nPress Ctrl+C to stop the server\n")
+    except Exception as e:
+        logging.error(f"Error during system initialization: {e}", exc_info=True)
+        global authenticated
+        authenticated = False
 
 if __name__ == '__main__':
     try:
-        initialize_system()
+        # Initialize database
+        db.initialize_database()
+        
         print("\n🌐 Starting Flask-SocketIO server...")
         print("=" * 70)
+        print("🔒 Login required at: http://localhost:5000/login")
+        print("=" * 70)
+        
+        # Don't initialize system here - wait for login
+        # System will be initialized after successful login via initialize_system_async()
         
         # Get server configuration from environment (with defaults)
         flask_host = os.getenv('FLASK_HOST', '0.0.0.0')

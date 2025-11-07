@@ -484,6 +484,11 @@
                     <i class="bi bi-bar-chart-fill"></i> Backtest
                 </a>
             </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" onclick="logout()" style="color: var(--text-primary); border: none; padding: 8px 20px; background: none; cursor: pointer;">
+                    <i class="bi bi-box-arrow-right"></i> Logout
+                </button>
+            </li>
         </ul>
 
         <!-- Tab Content -->
@@ -741,6 +746,26 @@
             const pnlText = realized_pnl >= 0 ? `Profit: ₹${realized_pnl.toFixed(2)}` : `Loss: ₹${Math.abs(realized_pnl).toFixed(2)}`;
             alert(`[${exchange}] Position Closed!\n${data.exit_reason}\nExit Price: ₹${data.exit_price}\n${pnlText}`);
         });
+
+        async function logout() {
+            if (confirm('Are you sure you want to logout?')) {
+                try {
+                    const response = await fetch('/api/logout', {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/json'
+                        }
+                    });
+                    const result = await response.json();
+                    if (result.success) {
+                        window.location.href = '/login';
+                    }
+                } catch (error) {
+                    console.error('Logout error:', error);
+                    window.location.href = '/login';
+                }
+            }
+        }
 
         function updateUI(data, exchange) {
             const suffix = exchange;
