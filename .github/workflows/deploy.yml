@@ -156,6 +156,24 @@ jobs:
             REMOTE_USER="$(whoami)"
             echo "Remote user: $REMOTE_USER"
             
+            # Determine sudo usage
+            SUDO_CMD=""
+            if [ "$REMOTE_USER" != "root" ]; then
+              if command -v sudo >/dev/null 2>&1; then
+                if sudo -n true 2>/dev/null; then
+                  SUDO_CMD="sudo"
+                else
+                  echo "❌ Passwordless sudo is required for deployment."
+                  echo "Please configure the user '$REMOTE_USER' with passwordless sudo for systemctl and chown commands."
+                  echo "Example: create a sudoers file with:"
+                  echo "  $REMOTE_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /bin/chown"
+                  exit 1
+                fi
+              else
+                echo "⚠️  sudo not available; continuing without sudo."
+              fi
+            fi
+            
             # Ensure deployment directory exists
             mkdir -p "$DEPLOY_PATH"
 
@@ -163,8 +181,8 @@ jobs:
             if [ -d "$DEPLOY_PATH" ]; then
               if chown -R "$REMOTE_USER":"$REMOTE_USER" "$DEPLOY_PATH" 2>/dev/null; then
                 true
-              elif command -v sudo >/dev/null 2>&1; then
-                sudo chown -R "$REMOTE_USER":"$REMOTE_USER" "$DEPLOY_PATH"
+              elif [ -n "$SUDO_CMD" ]; then
+                $SUDO_CMD chown -R "$REMOTE_USER":"$REMOTE_USER" "$DEPLOY_PATH"
               else
                 echo "⚠️  Warning: Could not change ownership of $DEPLOY_PATH"
               fi
@@ -209,10 +227,13 @@ jobs:
             
             # Restart application service
             echo "Restarting application..."
-            sudo systemctl restart oi-tracker || true
-            
-            # Check service status
-            sudo systemctl status oi-tracker --no-pager || true
+            if [ -n "$SUDO_CMD" ]; then
+              $SUDO_CMD systemctl restart oi-tracker || true
+              $SUDO_CMD systemctl status oi-tracker --no-pager || true
+            else
+              systemctl restart oi-tracker || true
+              systemctl status oi-tracker --no-pager || true
+            fi
             
             echo "✅ Deployment completed successfully!"
           ENDSSH
@@ -224,10 +245,33 @@ jobs:
         run: |
           echo "Waiting for application to start..."
           sleep 10
-          # Try to verify via SSH first (check service status)
-          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP "sudo systemctl is-active oi-tracker" || {
+          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP 'REMOTE_USER=$(whoami);
+            SUDO_CMD="";
+            if [ "$REMOTE_USER" != "root" ] && command -v sudo >/dev/null 2>&1; then
+              if sudo -n true 2>/dev/null; then
+                SUDO_CMD="sudo";
+              else
+                echo "⚠️  Passwordless sudo not available; attempting without sudo";
+              fi;
+            fi;
+            if [ -n "$SUDO_CMD" ]; then
+              $SUDO_CMD systemctl is-active oi-tracker;
+            else
+              systemctl is-active oi-tracker;
+            fi' || {
             echo "Service is not active. Checking logs..."
-            ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP "sudo journalctl -u oi-tracker -n 20 --no-pager" || true
+            ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP 'REMOTE_USER=$(whoami);
+              SUDO_CMD="";
+              if [ "$REMOTE_USER" != "root" ] && command -v sudo >/dev/null 2>&1; then
+                if sudo -n true 2>/dev/null; then
+                  SUDO_CMD="sudo";
+                fi;
+              fi;
+              if [ -n "$SUDO_CMD" ]; then
+                $SUDO_CMD journalctl -u oi-tracker -n 20 --no-pager;
+              else
+                journalctl -u oi-tracker -n 20 --no-pager;
+              fi' || true
             exit 1
           }
           echo "Service is active. Deployment verified successfully!"

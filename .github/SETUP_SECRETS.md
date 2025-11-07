@@ -72,6 +72,16 @@ cat ~/.ssh/github_actions_deploy
 3. Go to **Actions** tab to see the workflow run
 4. The workflow will validate secrets before attempting deployment
 
+### Step 6: Ensure Passwordless sudo (Required)
+
+The deployment script needs to run `systemctl` and `chown` without interactive password prompts. Add a sudoers entry for your deployment user using `sudo visudo` (replace `deployuser` with your SSH username):
+
+```
+deployuser ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /bin/chown
+```
+
+This allows the CI/CD workflow to manage the service and adjust permissions safely.
+
 ## Troubleshooting
 
 ### "HOST_IP secret is not set"

@@ -69,6 +69,12 @@ chmod 600 .env
 chown www-data:www-data .env
 ```
 
+> **Important:** Ensure the deployment user has passwordless sudo access for `systemctl` and `chown`. Add a sudoers entry (via `visudo`):
+> ```
+> deployuser ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /bin/chown
+> ```
+> Replace `deployuser` with your SSH username.
+
 ## Step 3: Install Dependencies
 
 ```bash

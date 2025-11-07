@@ -34,8 +34,10 @@ python3 database_migration.py
 
 # Start service
 sudo systemctl start oi-tracker
+sudo systemctl enable oi-tracker
 sudo systemctl status oi-tracker
-```
+
+> **Remember:** The deployment user must have passwordless sudo for `systemctl` and `chown` (see `.github/SETUP_SECRETS.md`).
 
 ### 2. Configure GitHub Secrets
 
