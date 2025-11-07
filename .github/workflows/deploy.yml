@@ -1,0 +1,125 @@
+name: CI/CD Pipeline
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  PYTHON_VERSION: '3.12'
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Cache pip packages
+        uses: actions/cache@v3
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          if [ -f ml_system/requirements_ml.txt ]; then
+            pip install -r ml_system/requirements_ml.txt
+          fi
+
+      - name: Run linter
+        run: |
+          pip install flake8 black
+          # Run flake8 (optional - can be configured)
+          # flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+          # flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+      - name: Check Python syntax
+        run: |
+          python -m py_compile oi_tracker_web.py
+          python -m py_compile database.py
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ secrets.HOST_IP }} >> ~/.ssh/known_hosts
+
+      - name: Deploy to server
+        env:
+          HOST_IP: ${{ secrets.HOST_IP }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+        run: |
+          ssh $SSH_USER@$HOST_IP << 'ENDSSH'
+            set -e
+            cd $DEPLOY_PATH || exit 1
+            
+            # Pull latest changes
+            echo "Pulling latest changes..."
+            git fetch origin
+            git reset --hard origin/main
+            
+            # Activate virtual environment
+            if [ ! -d "venv" ]; then
+              echo "Creating virtual environment..."
+              python3 -m venv venv
+            fi
+            source venv/bin/activate
+            
+            # Install/update dependencies
+            echo "Installing dependencies..."
+            pip install --upgrade pip
+            pip install -r requirements.txt
+            if [ -f ml_system/requirements_ml.txt ]; then
+              pip install -r ml_system/requirements_ml.txt
+            fi
+            
+            # Run database migration if needed
+            if [ -f database_migration.py ]; then
+              echo "Running database migration..."
+              python3 database_migration.py || true
+            fi
+            
+            # Restart application service
+            echo "Restarting application..."
+            sudo systemctl restart oi-tracker || true
+            
+            # Check service status
+            sudo systemctl status oi-tracker --no-pager || true
+            
+            echo "Deployment completed successfully!"
+          ENDSSH
+
+      - name: Verify deployment
+        env:
+          HOST_IP: ${{ secrets.HOST_IP }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+        run: |
+          echo "Waiting for application to start..."
+          sleep 5
+          curl -f http://$HOST_IP:5000/login || exit 1
+          echo "Deployment verified successfully!"
+

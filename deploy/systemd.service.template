@@ -1,0 +1,25 @@
+[Unit]
+Description=OI Tracker Web Application
+After=network.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/var/www/oi-tracker
+Environment="PATH=/var/www/oi-tracker/venv/bin"
+Environment="PYTHONUNBUFFERED=1"
+ExecStart=/var/www/oi-tracker/venv/bin/python /var/www/oi-tracker/oi_tracker_web.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=oi-tracker
+
+# Security settings
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
+

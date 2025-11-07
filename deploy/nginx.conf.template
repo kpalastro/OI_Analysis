@@ -1,0 +1,56 @@
+server {
+    listen 80;
+    server_name aiagents4biz.in www.aiagents4biz.in;
+
+    client_max_body_size 10M;
+
+    location / {
+        proxy_pass http://127.0.0.1:5000;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        
+        # WebSocket support
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        
+        # Timeouts
+        proxy_connect_timeout 60s;
+        proxy_send_timeout 60s;
+        proxy_read_timeout 60s;
+    }
+
+    # Static files (if needed)
+    location /static {
+        alias /var/www/oi-tracker/static;
+        expires 30d;
+        add_header Cache-Control "public, immutable";
+    }
+
+    # Security headers
+    add_header X-Frame-Options "SAMEORIGIN" always;
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header X-XSS-Protection "1; mode=block" always;
+}
+
+# SSL configuration (after running certbot)
+# server {
+#     listen 443 ssl http2;
+#     server_name aiagents4biz.in www.aiagents4biz.in;
+# 
+#     ssl_certificate /etc/letsencrypt/live/aiagents4biz.in/fullchain.pem;
+#     ssl_certificate_key /etc/letsencrypt/live/aiagents4biz.in/privkey.pem;
+#     include /etc/letsencrypt/options-ssl-nginx.conf;
+#     ssl_dhparam /etc/letsencrypt/ssl-dhparams.pem;
+# 
+#     # ... rest of configuration same as above
+# }
+# 
+# server {
+#     listen 80;
+#     server_name aiagents4biz.in www.aiagents4biz.in;
+#     return 301 https://$server_name$request_uri;
+# }
+
