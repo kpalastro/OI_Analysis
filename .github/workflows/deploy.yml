@@ -153,6 +153,22 @@ jobs:
             
             echo "Repository URL: $REPO_URL"
             echo "Deployment path: $DEPLOY_PATH"
+            REMOTE_USER="$(whoami)"
+            echo "Remote user: $REMOTE_USER"
+            
+            # Ensure deployment directory exists
+            mkdir -p "$DEPLOY_PATH"
+
+            # Fix permissions on deployment directory if needed
+            if [ -d "$DEPLOY_PATH" ]; then
+              if chown -R "$REMOTE_USER":"$REMOTE_USER" "$DEPLOY_PATH" 2>/dev/null; then
+                true
+              elif command -v sudo >/dev/null 2>&1; then
+                sudo chown -R "$REMOTE_USER":"$REMOTE_USER" "$DEPLOY_PATH"
+              else
+                echo "⚠️  Warning: Could not change ownership of $DEPLOY_PATH"
+              fi
+            fi
             
             if [ ! -d "$DEPLOY_PATH/.git" ]; then
               echo "🔄 Repository not found at $DEPLOY_PATH. Cloning..."
