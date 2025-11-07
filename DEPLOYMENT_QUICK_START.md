@@ -8,8 +8,10 @@
 # Connect to server
 ssh user@aiagents4biz.in
 
-# Clone repository
-sudo git clone https://github.com/your-username/OI_Analysis.git /var/www/oi-tracker
+# Clone repository (use HTTPS if SSH not set up)
+git clone https://github.com/kpalastro/OI_Analysis.git /var/www/oi-tracker
+# OR if SSH is configured:
+# git clone git@github.com:kpalastro/OI_Analysis.git /var/www/oi-tracker
 
 # Run setup script
 cd /var/www/oi-tracker

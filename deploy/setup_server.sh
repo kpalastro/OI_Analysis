@@ -45,6 +45,15 @@ echo -e "${GREEN}Step 2: Creating deployment directory...${NC}"
 mkdir -p $DEPLOY_PATH
 chown $DEPLOY_USER:$DEPLOY_USER $DEPLOY_PATH
 
+echo -e "${YELLOW}Note: If you haven't cloned the repository yet, run:${NC}"
+echo "  git clone https://github.com/kpalastro/OI_Analysis.git $DEPLOY_PATH"
+echo "  OR"
+echo "  git clone git@github.com:kpalastro/OI_Analysis.git $DEPLOY_PATH"
+echo ""
+echo -e "${YELLOW}See deploy/CLONE_REPOSITORY.md for SSH key setup if needed.${NC}"
+echo ""
+read -p "Press Enter to continue after cloning the repository..."
+
 echo -e "${GREEN}Step 3: Setting up Python virtual environment...${NC}"
 cd $DEPLOY_PATH
 if [ ! -d "venv" ]; then
