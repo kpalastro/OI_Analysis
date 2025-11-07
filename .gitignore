@@ -43,3 +43,8 @@ ml_system/models/*.keras
 ml_system/training/reports/*.png
 ml_system/training/reports/*.csv
 
+# Deployment
+deploy/.env
+*.backup
+backups/
+
