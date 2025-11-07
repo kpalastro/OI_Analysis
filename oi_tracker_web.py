@@ -1736,10 +1736,11 @@ if __name__ == '__main__':
         # System will be initialized after successful login via initialize_system_async()
         
         # Get server configuration from environment (with defaults)
-        flask_host = os.getenv('FLASK_HOST', '0.0.0.0')
-        flask_port = int(os.getenv('FLASK_PORT', 5555))
+        flask_host = os.getenv('FLASK_HOST', '127.0.0.1')
+        flask_port = int(os.getenv('FLASK_PORT', 5000))
         
-        socketio.run(app, host=flask_host, port=flask_port, debug=False, use_reloader=False)
+        # For production, allow_unsafe_werkzeug=True is needed (we're behind Nginx reverse proxy)
+        socketio.run(app, host=flask_host, port=flask_port, debug=False, use_reloader=False, allow_unsafe_werkzeug=True)
     except KeyboardInterrupt:
         print("\n\n✓ Server stopped by user (Ctrl+C)")
         logging.info("Server stopped by user")
