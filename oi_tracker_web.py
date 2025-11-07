@@ -10,12 +10,25 @@ import atexit
 import os
 from datetime import datetime, date, timedelta, timezone
 from threading import Thread, Lock
-from flask import Flask, render_template, jsonify, request
+from flask import Flask, render_template, jsonify, request, redirect, url_for
 from flask_socketio import SocketIO, emit
+from functools import wraps
 from kite_trade import *
 from kiteconnect import KiteTicker
 import database as db
 from dotenv import load_dotenv
+
+# ML System imports
+try:
+    import sys
+    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+    from ml_system.predictions.realtime_predictor import RealTimePredictor
+    from ml_system.predictions.signal_generator import SignalGenerator
+    from ml_system.features.feature_engineer import FeatureEngineer
+    ML_SYSTEM_AVAILABLE = True
+except ImportError as e:
+    ML_SYSTEM_AVAILABLE = False
+    logging.warning(f"ML System not available: {e}")
 
 # Load environment variables from .env file
 load_dotenv()
@@ -24,21 +37,11 @@ load_dotenv()
 # --- CONFIGURATION ---
 # ==============================================================================
 
-# --- Login Credentials (loaded from environment variables) ---
-USER_ID = os.getenv('ZERODHA_USER_ID')
-PASSWORD = os.getenv('ZERODHA_PASSWORD')
-
-# Validate credentials are loaded
-if not USER_ID or not PASSWORD:
-    print("=" * 70)
-    print("ERROR: Credentials not found!")
-    print("=" * 70)
-    print("\nPlease ensure you have created a .env file with:")
-    print("  ZERODHA_USER_ID=your_client_id")
-    print("  ZERODHA_PASSWORD=your_password")
-    print("\nYou can copy .env.example to .env and fill in your details.")
-    print("=" * 70)
-    sys.exit(1)
+# --- Login Credentials (optional - can be entered via login UI) ---
+# Note: Credentials can be loaded from .env for convenience, but are not required at startup
+# Users can also enter them directly in the login UI
+USER_ID = os.getenv('ZERODHA_USER_ID', '')
+PASSWORD = os.getenv('ZERODHA_PASSWORD', '')
 
 # TWOFA will be requested at runtime via user input
 
@@ -147,7 +150,11 @@ latest_oi_data = {
         'pcr': None,
         'exchange': 'NSE',
         'underlying_name': 'NIFTY',
-        'strike_difference': 50
+        'strike_difference': 50,
+        'ml_prediction': None,
+        'ml_signal': None,
+        'ml_confidence': None,
+        'ml_prediction_pct': None
     },
     'BSE': {
         'call_options': [],
@@ -159,9 +166,19 @@ latest_oi_data = {
         'pcr': None,
         'exchange': 'BSE',
         'underlying_name': 'SENSEX',
-        'strike_difference': 100
+        'strike_difference': 100,
+        'ml_prediction': None,
+        'ml_signal': None,
+        'ml_confidence': None,
+        'ml_prediction_pct': None
     }
 }
+
+# ML System objects (initialized later)
+ml_predictor = None
+ml_signal_generator = None
+ml_feature_engineer = None
+ml_models_loaded = False
 
 # Paper Trading: Open Positions (per exchange)
 # Structure: {exchange: {position_id: {symbol, type, side, entry_price, qty, entry_time, current_price, mtm}}}
@@ -187,8 +204,12 @@ closed_positions_pnl = {
 
 # Flask app
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-here')
+app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-change-in-production')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
+
+# Authentication state
+authenticated = False
+current_enctoken = None
 
 # ==============================================================================
 # --- CORE FUNCTIONS (from original script) ---
@@ -727,6 +748,7 @@ def run_data_update_loop_exchange(exchange):
         exchange: 'NSE' or 'BSE'
     """
     global kite, latest_oi_data, exchange_instruments, kws
+    global ml_predictor, ml_signal_generator, ml_feature_engineer, ml_models_loaded
     
     # Get exchange-specific configuration
     config = EXCHANGE_CONFIGS[exchange]
@@ -813,6 +835,53 @@ def run_data_update_loop_exchange(exchange):
             # Monitor open positions and auto-exit if needed
             monitor_positions(call_options, put_options, exchange)
             
+            # Generate ML prediction if available
+            ml_prediction_data = None
+            if ml_models_loaded and ml_predictor and ml_feature_engineer and underlying_ltp:
+                try:
+                    # Get recent data for feature engineering
+                    from ml_system.data.data_extractor import DataExtractor
+                    extractor = DataExtractor()
+                    try:
+                        # Get last few records for feature engineering
+                        raw_data = extractor.get_time_series_data(exchange, lookback_days=1)
+                        if not raw_data.empty:
+                            # Engineer features
+                            features_df = ml_feature_engineer.engineer_all_features(raw_data)
+                            if not features_df.empty:
+                                # Get latest features
+                                feature_cols = [col for col in features_df.columns 
+                                               if col not in ['timestamp', 'future_price', 'price_change', 'price_change_pct', 'direction']]
+                                latest_features = features_df[feature_cols].iloc[[-1]]
+                                
+                                # Make prediction
+                                prediction_result = ml_predictor.predict_and_signal(
+                                    latest_features,
+                                    entry_threshold=0.02,
+                                    min_confidence=0.5
+                                )
+                                
+                                # Generate signal
+                                signal = ml_signal_generator.generate_signal(
+                                    prediction=prediction_result['prediction'],
+                                    confidence=prediction_result['confidence'],
+                                    current_price=underlying_ltp,
+                                    capital=100000.0
+                                )
+                                
+                                ml_prediction_data = {
+                                    'prediction': prediction_result['prediction'],
+                                    'prediction_pct': prediction_result['prediction'],
+                                    'confidence': prediction_result['confidence'],
+                                    'signal': signal.signal_type,
+                                    'strength': signal.strength,
+                                    'reasoning': signal.reasoning
+                                }
+                    finally:
+                        extractor.close()
+                except Exception as e:
+                    logging.warning(f"{exchange}: ML prediction error: {e}")
+            
             # Update global data
             with data_lock:
                 latest_oi_data[exchange]['call_options'] = call_options
@@ -822,6 +891,13 @@ def run_data_update_loop_exchange(exchange):
                 latest_oi_data[exchange]['last_update'] = datetime.now().strftime('%H:%M:%S')
                 latest_oi_data[exchange]['status'] = 'Live'
                 latest_oi_data[exchange]['pcr'] = pcr
+                if ml_prediction_data:
+                    latest_oi_data[exchange]['ml_prediction'] = ml_prediction_data['prediction']
+                    latest_oi_data[exchange]['ml_prediction_pct'] = ml_prediction_data['prediction_pct']
+                    latest_oi_data[exchange]['ml_signal'] = ml_prediction_data['signal']
+                    latest_oi_data[exchange]['ml_confidence'] = ml_prediction_data['confidence']
+                    latest_oi_data[exchange]['ml_strength'] = ml_prediction_data['strength']
+                    latest_oi_data[exchange]['ml_reasoning'] = ml_prediction_data['reasoning']
             
             # Save to database (including underlying price and ATM strike)
             current_timestamp = datetime.now()
@@ -857,14 +933,334 @@ def run_data_update_loop_exchange(exchange):
 # --- FLASK ROUTES ---
 # ==============================================================================
 
+def login_required(f):
+    """Decorator to require authentication."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        global authenticated
+        if not authenticated:
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
+
+@app.route('/login')
+def login():
+    """Login page route."""
+    global authenticated, USER_ID
+    if authenticated:
+        return redirect(url_for('index'))
+    # Pass USER_ID from .env if available (for convenience, but user can override)
+    return render_template('login.html', default_user_id=USER_ID if USER_ID else '')
+
+@app.route('/api/login', methods=['POST'])
+def api_login():
+    """API endpoint for login authentication."""
+    global authenticated, kite, current_enctoken
+    
+    try:
+        data = request.get_json()
+        user_id = data.get('user_id', '').strip()
+        password = data.get('password', '').strip()
+        twofa = data.get('twofa', '').strip()
+        
+        if not user_id or not password or not twofa:
+            return jsonify({'success': False, 'error': 'All fields are required'}), 400
+        
+        if len(twofa) != 6 or not twofa.isdigit():
+            return jsonify({'success': False, 'error': '2FA code must be a 6-digit number'}), 400
+        
+        # Authenticate with Zerodha
+        try:
+            enctoken = get_enctoken(user_id, password, twofa)
+            if not enctoken:
+                return jsonify({'success': False, 'error': 'Invalid credentials or 2FA code'}), 401
+            
+            # Initialize KiteApp
+            kite_instance = KiteApp(enctoken=enctoken)
+            
+            # Verify connection
+            profile = kite_instance.profile()
+            
+            # Store authentication state
+            authenticated = True
+            current_enctoken = enctoken
+            kite = kite_instance
+            
+            # Start initialization in background
+            Thread(target=initialize_system_async, daemon=True).start()
+            
+            return jsonify({
+                'success': True,
+                'message': f'Authenticated as {profile.get("user_id")}',
+                'user_id': profile.get('user_id'),
+                'user_name': profile.get('user_name')
+            })
+        
+        except Exception as e:
+            logging.error(f"Login error: {e}", exc_info=True)
+            return jsonify({'success': False, 'error': f'Authentication failed: {str(e)}'}), 401
+    
+    except Exception as e:
+        logging.error(f"Login API error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': 'Server error during login'}), 500
+
+@app.route('/api/logout', methods=['POST'])
+def api_logout():
+    """API endpoint for logout."""
+    global authenticated, kite, current_enctoken, kws
+    
+    authenticated = False
+    current_enctoken = None
+    kite = None
+    
+    # Close WebSocket connections
+    if kws:
+        try:
+            kws.close()
+        except:
+            pass
+        kws = None
+    
+    return jsonify({'success': True, 'message': 'Logged out successfully'})
+
 @app.route('/')
+@login_required
 def index():
     """Main page route - now supports dual exchange tabs."""
+    if not authenticated:
+        return redirect(url_for('login'))
     return render_template('index.html', 
                           exchanges=['NSE', 'BSE'],
                           exchange_configs=EXCHANGE_CONFIGS,
                           intervals=OI_CHANGE_INTERVALS_MIN,
                           thresholds=PCT_CHANGE_THRESHOLDS)
+
+@app.route('/backtest')
+@login_required
+def backtest_page():
+    """Backtesting page route."""
+    return render_template('backtest.html',
+                          exchanges=['NSE', 'BSE'],
+                          exchange_configs=EXCHANGE_CONFIGS)
+
+@app.route('/api/backtest', methods=['POST'])
+def run_backtest():
+    """API endpoint to run backtest."""
+    try:
+        from ml_system.backtesting.backtest_engine import BacktestEngine
+        from ml_system.data.data_extractor import DataExtractor
+        from ml_system.features.feature_engineer import FeatureEngineer
+        from ml_system.training.train_baseline import BaselineTrainer
+        import joblib
+        
+        data = request.get_json()
+        
+        # Get parameters
+        exchange = data.get('exchange', 'NSE')
+        initial_capital = float(data.get('initial_capital', 100000))
+        entry_threshold = float(data.get('entry_threshold', 0.02))
+        exit_threshold = float(data.get('exit_threshold', 0.05))
+        stop_loss_pct = float(data.get('stop_loss_pct', 0.03))
+        max_holding_periods = int(data.get('max_holding_periods', 30))
+        lookback_days = int(data.get('lookback_days', 30))
+        commission_rate = float(data.get('commission_rate', 0.0003))
+        slippage = float(data.get('slippage', 0.0001))
+        position_size_pct = float(data.get('position_size_pct', 0.1))
+        
+        # Initialize backtester
+        backtester = BacktestEngine(
+            initial_capital=initial_capital,
+            commission_rate=commission_rate,
+            slippage=slippage,
+            position_size_pct=position_size_pct
+        )
+        
+        # Get data and train/load model
+        extractor = DataExtractor()
+        engineer = FeatureEngineer()
+        trainer = BaselineTrainer()
+        
+        try:
+            # Get time series data
+            raw_data = extractor.get_time_series_data(exchange, lookback_days=lookback_days)
+            
+            if raw_data.empty:
+                return jsonify({'error': 'No data available for backtesting'}), 400
+            
+            # Engineer features
+            features_df = engineer.engineer_all_features(raw_data)
+            
+            if features_df.empty:
+                return jsonify({'error': 'Feature engineering failed'}), 400
+            
+            # Prepare data
+            feature_cols = [col for col in features_df.columns 
+                           if col not in ['timestamp', 'future_price', 'price_change', 'price_change_pct', 'direction']]
+            X = features_df[feature_cols]
+            y = features_df['price_change_pct']
+            prices = features_df['underlying_price']
+            timestamps = features_df['timestamp']
+            
+            # Remove NaN
+            valid_mask = ~(X.isna().any(axis=1) | y.isna() | prices.isna())
+            X = X[valid_mask]
+            y = y[valid_mask]
+            prices = prices[valid_mask]
+            timestamps = timestamps[valid_mask]
+            
+            if len(X) == 0:
+                return jsonify({'error': 'No valid data after cleaning'}), 400
+            
+            # Split data (80% train, 20% test)
+            split_idx = int(len(X) * 0.8)
+            X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
+            y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+            prices_test = prices.iloc[split_idx:]
+            timestamps_test = timestamps.iloc[split_idx:]
+            
+            # Load or train model
+            model_path = "ml_system/models/random_forest_model.pkl"
+            predictions = None
+            
+            # Ensure trainer has models and scalers dicts
+            if not hasattr(trainer, 'models'):
+                trainer.models = {}
+            if not hasattr(trainer, 'scalers'):
+                trainer.scalers = {}
+            
+            if os.path.exists(model_path):
+                try:
+                    loaded_model = joblib.load(model_path)
+                    trainer.models['random_forest'] = loaded_model
+                    
+                    scaler_path = "ml_system/models/random_forest_scaler.pkl"
+                    if os.path.exists(scaler_path):
+                        loaded_scaler = joblib.load(scaler_path)
+                        trainer.scalers['random_forest'] = loaded_scaler
+                        X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
+                        # Convert scaled array back to DataFrame with column names
+                        X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns, index=X_test.index)
+                        predictions = trainer.models['random_forest'].predict(X_test_scaled_df)
+                    else:
+                        # Model exists but no scaler - use model without scaling
+                        logging.warning("Random Forest model found but no scaler. Using model without scaling.")
+                        # Ensure X_test is a DataFrame with proper column names to avoid warnings
+                        if isinstance(X_test, pd.DataFrame):
+                            predictions = trainer.models['random_forest'].predict(X_test)
+                        else:
+                            # Convert to DataFrame if it's not already
+                            X_test_df = pd.DataFrame(X_test, columns=X_test.columns if hasattr(X_test, 'columns') else None)
+                            predictions = trainer.models['random_forest'].predict(X_test_df)
+                except Exception as e:
+                    logging.error(f"Error loading random_forest model: {e}", exc_info=True)
+                    predictions = None
+            
+            # If model loading failed or doesn't exist, train new model
+            if predictions is None:
+                # Train model
+                features_df_filtered = features_df.loc[valid_mask]
+                baseline_results = trainer.train_all_baselines(
+                    features_df_filtered,
+                    target_col='price_change_pct',
+                    task='regression'
+                )
+                # Use best model predictions
+                if 'random_forest' in trainer.models:
+                    if 'random_forest' in trainer.scalers:
+                        X_test_scaled = trainer.scalers['random_forest'].transform(X_test)
+                        # Convert scaled array back to DataFrame with column names
+                        X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns, index=X_test.index)
+                        predictions = trainer.models['random_forest'].predict(X_test_scaled_df)
+                    else:
+                        # Ensure X_test is a DataFrame with proper column names
+                        if isinstance(X_test, pd.DataFrame):
+                            predictions = trainer.models['random_forest'].predict(X_test)
+                        else:
+                            X_test_df = pd.DataFrame(X_test, columns=X_test.columns if hasattr(X_test, 'columns') else None)
+                            predictions = trainer.models['random_forest'].predict(X_test_df)
+                else:
+                    # Use first available model
+                    model_name = list(trainer.models.keys())[0]
+                    if model_name in trainer.scalers:
+                        X_test_scaled = trainer.scalers[model_name].transform(X_test)
+                        # Convert scaled array back to DataFrame with column names
+                        X_test_scaled_df = pd.DataFrame(X_test_scaled, columns=X_test.columns, index=X_test.index)
+                        predictions = trainer.models[model_name].predict(X_test_scaled_df)
+                    else:
+                        # Ensure X_test is a DataFrame with proper column names
+                        if isinstance(X_test, pd.DataFrame):
+                            predictions = trainer.models[model_name].predict(X_test)
+                        else:
+                            X_test_df = pd.DataFrame(X_test, columns=X_test.columns if hasattr(X_test, 'columns') else None)
+                            predictions = trainer.models[model_name].predict(X_test_df)
+            
+            if predictions is None or len(predictions) == 0:
+                return jsonify({'error': 'Failed to generate predictions. Please ensure models are trained.'}), 500
+            
+            # Run backtest
+            result = backtester.backtest_strategy(
+                predictions=pd.Series(predictions),
+                actual_prices=pd.Series(prices_test.values),
+                timestamps=pd.Series(timestamps_test.values),
+                entry_threshold=entry_threshold,
+                exit_threshold=exit_threshold,
+                stop_loss_pct=stop_loss_pct,
+                max_holding_periods=max_holding_periods
+            )
+            
+            # Prepare response
+            trades_data = []
+            for trade in result.trades:
+                trades_data.append({
+                    'entry_time': trade.entry_time.isoformat() if trade.entry_time else None,
+                    'exit_time': trade.exit_time.isoformat() if trade.exit_time else None,
+                    'entry_price': trade.entry_price,
+                    'exit_price': trade.exit_price,
+                    'quantity': trade.quantity,
+                    'trade_type': trade.trade_type.value,
+                    'pnl': trade.pnl,
+                    'pnl_pct': trade.pnl_pct,
+                    'exit_reason': trade.exit_reason
+                })
+            
+            equity_curve_data = []
+            for timestamp, equity in result.equity_curve.items():
+                equity_curve_data.append({
+                    'timestamp': timestamp.isoformat() if hasattr(timestamp, 'isoformat') else str(timestamp),
+                    'equity': float(equity)
+                })
+            
+            response = {
+                'success': True,
+                'results': {
+                    'total_trades': result.total_trades,
+                    'winning_trades': result.winning_trades,
+                    'losing_trades': result.losing_trades,
+                    'total_pnl': float(result.total_pnl),
+                    'total_return_pct': float(result.total_return_pct),
+                    'win_rate': float(result.win_rate),
+                    'avg_win': float(result.avg_win),
+                    'avg_loss': float(result.avg_loss),
+                    'profit_factor': float(result.profit_factor),
+                    'max_drawdown': float(result.max_drawdown),
+                    'max_drawdown_pct': float(result.max_drawdown_pct),
+                    'sharpe_ratio': float(result.sharpe_ratio),
+                    'sortino_ratio': float(result.sortino_ratio),
+                    'initial_capital': float(initial_capital),
+                    'final_capital': float(initial_capital + result.total_pnl)
+                },
+                'trades': trades_data,
+                'equity_curve': equity_curve_data
+            }
+            
+            return jsonify(response)
+        
+        finally:
+            extractor.close()
+    
+    except Exception as e:
+        logging.error(f"Backtest error: {e}", exc_info=True)
+        return jsonify({'error': str(e)}), 500
 
 @app.route('/api/data')
 def get_data():
@@ -1024,303 +1420,320 @@ signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
 # --- MAIN INITIALIZATION ---
 # ==============================================================================
 
-def initialize_system():
-    """Initialize the trading system with dual exchange support and start background threads."""
+def initialize_system_async():
+    """Initialize the trading system asynchronously after login."""
     global kite, kws, exchange_instruments, latest_oi_data, oi_history
+    global ml_predictor, ml_signal_generator, ml_feature_engineer, ml_models_loaded
     
-    print("=" * 70)
-    print("DUAL EXCHANGE OI TRACKER - NSE (NIFTY) & BSE (SENSEX)")
-    print("=" * 70)
-    print("\n🔒 Credentials loaded from environment variables (.env file)")
+    if not kite:
+        logging.error("Kite instance not available for initialization")
+        return
     
-    # Get 2FA input
-    print(f"\nLogin ID: {USER_ID}")
-    twofa_input = input("Enter your 2FA PIN or TOTP code: ").strip()
-    if not twofa_input:
-        print("2FA code is required. Exiting.")
-        sys.exit(1)
-    
-    # Get enctoken
-    print("\nAuthenticating with Zerodha...")
-    enctoken = get_enctoken(USER_ID, PASSWORD, twofa_input)
-    if not enctoken:
-        print("Failed to get enctoken. Check your credentials.")
-        sys.exit(1)
-    
-    print("✓ Successfully obtained enctoken!")
-    
-    # Initialize KiteApp
-    kite = KiteApp(enctoken=enctoken)
-    print("✓ KiteApp initialized!")
-    
-    # Verify connection
-    profile = kite.profile()
-    print(f"✓ Connected as: {profile.get('user_id')} ({profile.get('user_name')})")
-    
-    # ==== NSE/NIFTY Instruments ====
-    print("\n" + "=" * 70)
-    print("FETCHING NSE/NIFTY INSTRUMENTS")
-    print("=" * 70)
-    
-    print("Fetching NFO (NIFTY Options) instruments...")
-    nfo_instruments = kite.instruments('NFO')
-    if not nfo_instruments:
-        print("Failed to fetch NFO instruments. Exiting.")
-        sys.exit(1)
-    print(f"✓ Fetched {len(nfo_instruments)} NFO instruments")
-    
-    print("Fetching NSE instruments...")
-    nse_instruments = kite.instruments('NSE')
-    if not nse_instruments:
-        print("Failed to fetch NSE instruments. Exiting.")
-        sys.exit(1)
-    print(f"✓ Fetched {len(nse_instruments)} NSE instruments")
-    
-    # Get NIFTY underlying token
-    nifty_config = EXCHANGE_CONFIGS['NSE']
-    nifty_token = get_instrument_token_for_symbol(
-        nse_instruments, 
-        nifty_config['underlying_symbol'], 
-        nifty_config['ltp_exchange']
-    )
-    if not nifty_token:
-        print(f"Could not find token for {nifty_config['underlying_symbol']}. Exiting.")
-        sys.exit(1)
-    print(f"✓ Found NIFTY token: {nifty_token}")
-    
-    # Get NIFTY nearest expiry
-    nifty_expiry_info = get_nearest_weekly_expiry(
-        nfo_instruments, 
-        nifty_config['underlying_prefix'],
-        nifty_config['options_exchange']
-    )
-    if not nifty_expiry_info:
-        print(f"Could not determine nearest expiry for NIFTY. Exiting.")
-        sys.exit(1)
-    print(f"✓ NIFTY expiry: {nifty_expiry_info['expiry'].strftime('%d-%b-%Y')}")
-    
-    # Store NSE data
-    exchange_instruments['NSE']['underlying_token'] = nifty_token
-    exchange_instruments['NSE']['nfo_instruments'] = nfo_instruments
-    exchange_instruments['NSE']['expiry_date'] = nifty_expiry_info['expiry']
-    exchange_instruments['NSE']['symbol_prefix'] = nifty_expiry_info['symbol_prefix']
-    
-    # ==== BSE/SENSEX Instruments ====
-    print("\n" + "=" * 70)
-    print("FETCHING BSE/SENSEX INSTRUMENTS")
-    print("=" * 70)
-    
-    print("Fetching BFO (SENSEX Options) instruments...")
-    bfo_instruments = kite.instruments('BFO')
-    if not bfo_instruments:
-        print("Failed to fetch BFO instruments. Exiting.")
-        sys.exit(1)
-    print(f"✓ Fetched {len(bfo_instruments)} BFO instruments")
-    
-    print("Fetching BSE instruments...")
-    bse_instruments = kite.instruments('BSE')
-    if not bse_instruments:
-        print("Failed to fetch BSE instruments. Exiting.")
-        sys.exit(1)
-    print(f"✓ Fetched {len(bse_instruments)} BSE instruments")
-    
-    # Get SENSEX underlying token
-    sensex_config = EXCHANGE_CONFIGS['BSE']
-    sensex_token = get_instrument_token_for_symbol(
-        bse_instruments, 
-        sensex_config['underlying_symbol'], 
-        sensex_config['ltp_exchange']
-    )
-    if not sensex_token:
-        print(f"Could not find token for {sensex_config['underlying_symbol']}. Exiting.")
-        sys.exit(1)
-    print(f"✓ Found SENSEX token: {sensex_token}")
-    
-    # Get SENSEX nearest expiry
-    sensex_expiry_info = get_nearest_weekly_expiry(
-        bfo_instruments, 
-        sensex_config['underlying_prefix'],
-        sensex_config['options_exchange']
-    )
-    if not sensex_expiry_info:
-        print(f"Could not determine nearest expiry for SENSEX. Exiting.")
-        sys.exit(1)
-    print(f"✓ SENSEX expiry: {sensex_expiry_info['expiry'].strftime('%d-%b-%Y')}")
-    
-    # Store BSE data
-    exchange_instruments['BSE']['underlying_token'] = sensex_token
-    exchange_instruments['BSE']['bfo_instruments'] = bfo_instruments
-    exchange_instruments['BSE']['expiry_date'] = sensex_expiry_info['expiry']
-    exchange_instruments['BSE']['symbol_prefix'] = sensex_expiry_info['symbol_prefix']
-    
-    # ==== Database Integration ====
-    print("\n" + "=" * 70)
-    print("CHECKING DATABASE FOR HISTORICAL DATA")
-    print("=" * 70)
-    
-    # Check if we should load from database for each exchange
-    for exchange in ['NSE', 'BSE']:
-        if db.should_load_from_db(exchange):
-            print(f"✓ {exchange}: Loading historical data from database...")
-            oi_history[exchange] = db.load_today_snapshots(exchange)
-            print(f"  Loaded {sum(len(v) for v in oi_history[exchange].values())} records")
-        else:
-            print(f"✓ {exchange}: Starting fresh (no recent data or gap > 30 min)")
-    
-    # Cleanup old data (30+ days)
-    db.cleanup_old_data(days_to_keep=30)
-    
-    
-    # ==== WebSocket Setup ====
-    print("\n" + "=" * 70)
-    print("SETTING UP WEBSOCKET CONNECTION")
-    print("=" * 70)
-    
-    user_id = profile.get('user_id')
-    kws = KiteTicker(api_key="TradeViaPython", access_token=enctoken+"&user_id="+user_id)
-    
-    def on_ticks(ws, ticks):
-        """Handle incoming tick data for both exchanges."""
-        global latest_tick_data, oi_history
-        current_time = datetime.now()  # Use timezone-naive for consistency with historical API
+    try:
+        logging.info("=" * 70)
+        logging.info("DUAL EXCHANGE OI TRACKER - NSE (NIFTY) & BSE (SENSEX)")
+        logging.info("=" * 70)
         
-        for tick in ticks:
-            instrument_token = tick.get('instrument_token')
-            if not instrument_token:
-                continue
-            
-            # Determine which exchange this token belongs to
-            exchange = None
-            if instrument_token == exchange_instruments['NSE']['underlying_token']:
-                exchange = 'NSE'
-            elif instrument_token == exchange_instruments['BSE']['underlying_token']:
-                exchange = 'BSE'
-            elif instrument_token in exchange_instruments['NSE'].get('option_tokens', []):
-                exchange = 'NSE'
-            elif instrument_token in exchange_instruments['BSE'].get('option_tokens', []):
-                exchange = 'BSE'
+        # Verify connection
+        profile = kite.profile()
+        logging.info(f"✓ Connected as: {profile.get('user_id')} ({profile.get('user_name')})")
+        
+        # ==== NSE/NIFTY Instruments ====
+        logging.info("\n" + "=" * 70)
+        logging.info("FETCHING NSE/NIFTY INSTRUMENTS")
+        logging.info("=" * 70)
+        
+        logging.info("Fetching NFO (NIFTY Options) instruments...")
+        nfo_instruments = kite.instruments('NFO')
+        if not nfo_instruments:
+            logging.error("Failed to fetch NFO instruments.")
+            return
+        logging.info(f"✓ Fetched {len(nfo_instruments)} NFO instruments")
+        
+        logging.info("Fetching NSE instruments...")
+        nse_instruments = kite.instruments('NSE')
+        if not nse_instruments:
+            logging.error("Failed to fetch NSE instruments.")
+            return
+        logging.info(f"✓ Fetched {len(nse_instruments)} NSE instruments")
+        
+        # Get NIFTY underlying token
+        nifty_config = EXCHANGE_CONFIGS['NSE']
+        nifty_token = get_instrument_token_for_symbol(
+            nse_instruments, 
+            nifty_config['underlying_symbol'], 
+            nifty_config['ltp_exchange']
+        )
+        if not nifty_token:
+            logging.error(f"Could not find token for {nifty_config['underlying_symbol']}.")
+            return
+        logging.info(f"✓ Found NIFTY token: {nifty_token}")
+        
+        # Get NIFTY nearest expiry
+        nifty_expiry_info = get_nearest_weekly_expiry(
+            nfo_instruments, 
+            nifty_config['underlying_prefix'],
+            nifty_config['options_exchange']
+        )
+        if not nifty_expiry_info:
+            logging.error(f"Could not determine nearest expiry for NIFTY.")
+            return
+        logging.info(f"✓ NIFTY expiry: {nifty_expiry_info['expiry'].strftime('%d-%b-%Y')}")
+    
+        # Store NSE data
+        exchange_instruments['NSE']['underlying_token'] = nifty_token
+        exchange_instruments['NSE']['nfo_instruments'] = nfo_instruments
+        exchange_instruments['NSE']['expiry_date'] = nifty_expiry_info['expiry']
+        exchange_instruments['NSE']['symbol_prefix'] = nifty_expiry_info['symbol_prefix']
+        
+        # ==== BSE/SENSEX Instruments ====
+        logging.info("\n" + "=" * 70)
+        logging.info("FETCHING BSE/SENSEX INSTRUMENTS")
+        logging.info("=" * 70)
+        
+        logging.info("Fetching BFO (SENSEX Options) instruments...")
+        bfo_instruments = kite.instruments('BFO')
+        if not bfo_instruments:
+            logging.error("Failed to fetch BFO instruments.")
+            return
+        logging.info(f"✓ Fetched {len(bfo_instruments)} BFO instruments")
+        
+        logging.info("Fetching BSE instruments...")
+        bse_instruments = kite.instruments('BSE')
+        if not bse_instruments:
+            logging.error("Failed to fetch BSE instruments.")
+            return
+        logging.info(f"✓ Fetched {len(bse_instruments)} BSE instruments")
+        
+        # Get SENSEX underlying token
+        sensex_config = EXCHANGE_CONFIGS['BSE']
+        sensex_token = get_instrument_token_for_symbol(
+            bse_instruments, 
+            sensex_config['underlying_symbol'], 
+            sensex_config['ltp_exchange']
+        )
+        if not sensex_token:
+            logging.error(f"Could not find token for {sensex_config['underlying_symbol']}.")
+            return
+        logging.info(f"✓ Found SENSEX token: {sensex_token}")
+        
+        # Get SENSEX nearest expiry
+        sensex_expiry_info = get_nearest_weekly_expiry(
+            bfo_instruments, 
+            sensex_config['underlying_prefix'],
+            sensex_config['options_exchange']
+        )
+        if not sensex_expiry_info:
+            logging.error(f"Could not determine nearest expiry for SENSEX.")
+            return
+        logging.info(f"✓ SENSEX expiry: {sensex_expiry_info['expiry'].strftime('%d-%b-%Y')}")
+    
+        # Store BSE data
+        exchange_instruments['BSE']['underlying_token'] = sensex_token
+        exchange_instruments['BSE']['bfo_instruments'] = bfo_instruments
+        exchange_instruments['BSE']['expiry_date'] = sensex_expiry_info['expiry']
+        exchange_instruments['BSE']['symbol_prefix'] = sensex_expiry_info['symbol_prefix']
+        
+        # ==== Database Integration ====
+        logging.info("\n" + "=" * 70)
+        logging.info("CHECKING DATABASE FOR HISTORICAL DATA")
+        logging.info("=" * 70)
+        
+        # Check if we should load from database for each exchange
+        for exchange in ['NSE', 'BSE']:
+            if db.should_load_from_db(exchange):
+                logging.info(f"✓ {exchange}: Loading historical data from database...")
+                oi_history[exchange] = db.load_today_snapshots(exchange)
+                logging.info(f"  Loaded {sum(len(v) for v in oi_history[exchange].values())} records")
             else:
-                # Try to identify by checking both token lists
-                for exch in ['NSE', 'BSE']:
-                    if instrument_token in exchange_instruments[exch].get('option_tokens', []):
-                        exchange = exch
-                        break
-                
-                # If still not found, log and skip (don't default to NSE)
-                if exchange is None:
-                    logging.debug(f"Received tick for uncategorized token {instrument_token}")
+                logging.info(f"✓ {exchange}: Starting fresh (no recent data or gap > 30 min)")
+        
+        # Cleanup old data (30+ days)
+        db.cleanup_old_data(days_to_keep=30)
+        
+        
+        # ==== WebSocket Setup ====
+        logging.info("\n" + "=" * 70)
+        logging.info("SETTING UP WEBSOCKET CONNECTION")
+        logging.info("=" * 70)
+        
+        user_id = profile.get('user_id')
+        global current_enctoken
+        kws_instance = KiteTicker(api_key="TradeViaPython", access_token=current_enctoken+"&user_id="+user_id)
+        global kws
+        kws = kws_instance
+        
+        def on_ticks(ws, ticks):
+            """Handle incoming tick data for both exchanges."""
+            global latest_tick_data, oi_history
+            current_time = datetime.now()  # Use timezone-naive for consistency with historical API
+            
+            for tick in ticks:
+                instrument_token = tick.get('instrument_token')
+                if not instrument_token:
                     continue
+                
+                # Determine which exchange this token belongs to
+                exchange = None
+                if instrument_token == exchange_instruments['NSE']['underlying_token']:
+                    exchange = 'NSE'
+                elif instrument_token == exchange_instruments['BSE']['underlying_token']:
+                    exchange = 'BSE'
+                elif instrument_token in exchange_instruments['NSE'].get('option_tokens', []):
+                    exchange = 'NSE'
+                elif instrument_token in exchange_instruments['BSE'].get('option_tokens', []):
+                    exchange = 'BSE'
+                else:
+                    # Try to identify by checking both token lists
+                    for exch in ['NSE', 'BSE']:
+                        if instrument_token in exchange_instruments[exch].get('option_tokens', []):
+                            exchange = exch
+                            break
+                    
+                    # If still not found, log and skip (don't default to NSE)
+                    if exchange is None:
+                        logging.debug(f"Received tick for uncategorized token {instrument_token}")
+                        continue
+                
+                # Store tick data
+                latest_tick_data[exchange][instrument_token] = tick
+                
+                # Store OI history if available (MODE_FULL provides OI)
+                if 'oi' in tick and tick['oi'] is not None:
+                    if instrument_token not in oi_history[exchange]:
+                        oi_history[exchange][instrument_token] = []
+                    
+                    # Add new OI record with timestamp
+                    oi_history[exchange][instrument_token].append({
+                        'date': current_time,
+                        'oi': tick['oi']
+                    })
+                    
+                    # Keep only last 60 minutes of OI history
+                    cutoff_time = current_time - timedelta(minutes=60)
+                    oi_history[exchange][instrument_token] = [
+                        record for record in oi_history[exchange][instrument_token]
+                        if record['date'] > cutoff_time
+                    ]
+                    
+                    # Log first few OI entries to verify data accumulation
+                    if len(oi_history[exchange][instrument_token]) <= 3:
+                        logging.info(f"{exchange}: Accumulating OI for token {instrument_token}: {len(oi_history[exchange][instrument_token])} records")
+    
+        def on_connect(ws, response):
+            """Subscribe to both NIFTY and SENSEX underlying tokens on connection."""
+            global ws_connected
+            ws_connected = True
+            logging.info("✓ WebSocket connected!")
             
-            # Store tick data
-            latest_tick_data[exchange][instrument_token] = tick
+            # Subscribe to both underlying tokens
+            nifty_token = exchange_instruments['NSE']['underlying_token']
+            sensex_token = exchange_instruments['BSE']['underlying_token']
             
-            # Store OI history if available (MODE_FULL provides OI)
-            if 'oi' in tick and tick['oi'] is not None:
-                if instrument_token not in oi_history[exchange]:
-                    oi_history[exchange][instrument_token] = []
-                
-                # Add new OI record with timestamp
-                oi_history[exchange][instrument_token].append({
-                    'date': current_time,
-                    'oi': tick['oi']
-                })
-                
-                # Keep only last 60 minutes of OI history
-                cutoff_time = current_time - timedelta(minutes=60)
-                oi_history[exchange][instrument_token] = [
-                    record for record in oi_history[exchange][instrument_token]
-                    if record['date'] > cutoff_time
-                ]
-                
-                # Log first few OI entries to verify data accumulation
-                if len(oi_history[exchange][instrument_token]) <= 3:
-                    logging.info(f"{exchange}: Accumulating OI for token {instrument_token}: {len(oi_history[exchange][instrument_token])} records")
-    
-    def on_connect(ws, response):
-        """Subscribe to both NIFTY and SENSEX underlying tokens on connection."""
-        global ws_connected
-        ws_connected = True
-        print("✓ WebSocket connected!")
+            ws.subscribe([nifty_token, sensex_token])
+            ws.set_mode(ws.MODE_QUOTE, [nifty_token, sensex_token])
+            logging.info(f"✓ Subscribed to NIFTY (token: {nifty_token}) and SENSEX (token: {sensex_token})")
         
-        # Subscribe to both underlying tokens
-        nifty_token = exchange_instruments['NSE']['underlying_token']
-        sensex_token = exchange_instruments['BSE']['underlying_token']
+        def on_close(ws, code, reason):
+            global ws_connected
+            ws_connected = False
+            logging.warning(f"⚠ WebSocket closed: {code} - {reason}")
         
-        ws.subscribe([nifty_token, sensex_token])
-        ws.set_mode(ws.MODE_QUOTE, [nifty_token, sensex_token])
-        print(f"✓ Subscribed to NIFTY (token: {nifty_token}) and SENSEX (token: {sensex_token})")
+        def on_error(ws, code, reason):
+            logging.error(f"✗ WebSocket error: {code} - {reason}")
+        
+        kws.on_ticks = on_ticks
+        kws.on_connect = on_connect
+        kws.on_close = on_close
+        kws.on_error = on_error
+        
+        kws.connect(threaded=True)
+        
+        # Wait for WebSocket
+        logging.info("Waiting for WebSocket connection...")
+        wait_count = 0
+        while not kws.is_connected() and wait_count < 10:
+            time.sleep(1)
+            wait_count += 1
+        
+        if not kws.is_connected():
+            logging.error("WebSocket failed to connect.")
+            return
+        
+        logging.info("✓ WebSocket connected successfully!")
+        time.sleep(3)  # Wait for initial tick data
+        
+        # ==== Start Background Data Update Threads ====
+        logging.info("\n" + "=" * 70)
+        logging.info("STARTING BACKGROUND DATA UPDATE THREADS")
+        logging.info("=" * 70)
+        
+        # Start NSE/NIFTY update thread
+        nse_thread = Thread(
+            target=run_data_update_loop_exchange, 
+            args=('NSE',),
+            daemon=True,
+            name='NSE-UpdateThread'
+        )
+        nse_thread.start()
+        logging.info("✓ NSE (NIFTY) update thread started")
+        
+        # Start BSE/SENSEX update thread
+        bse_thread = Thread(
+            target=run_data_update_loop_exchange, 
+            args=('BSE',),
+            daemon=True,
+            name='BSE-UpdateThread'
+        )
+        bse_thread.start()
+        logging.info("✓ BSE (SENSEX) update thread started")
+        
+        # Initialize ML System if available
+        if ML_SYSTEM_AVAILABLE:
+            try:
+                logging.info("\n" + "=" * 70)
+                logging.info("INITIALIZING ML PREDICTION SYSTEM")
+                logging.info("=" * 70)
+                ml_predictor = RealTimePredictor()
+                ml_signal_generator = SignalGenerator()
+                ml_feature_engineer = FeatureEngineer()
+                ml_predictor.load_models()
+                ml_models_loaded = ml_predictor.is_loaded
+                if ml_models_loaded:
+                    logging.info("✓ ML models loaded successfully")
+                else:
+                    logging.warning("⚠️  ML models not found. Train models first using: python3 ml_system/test_phase2.py")
+            except Exception as e:
+                logging.warning(f"ML System initialization failed: {e}")
+                ml_models_loaded = False
+        
+        logging.info("\n" + "=" * 70)
+        logging.info("✓ SYSTEM INITIALIZED SUCCESSFULLY!")
+        logging.info("=" * 70)
+        logging.info(f"📊 Tracking: NIFTY (NSE) and SENSEX (BSE)")
+        logging.info(f"🔄 Refresh interval: {REFRESH_INTERVAL_SECONDS} seconds")
+        if ml_models_loaded:
+            logging.info("🤖 ML Predictions: Enabled")
+        logging.info("💾 Database: Enabled (30-day retention)")
+        logging.info("💰 Underlying prices: Saved with every refresh")
     
-    def on_close(ws, code, reason):
-        global ws_connected
-        ws_connected = False
-        print(f"⚠ WebSocket closed: {code} - {reason}")
-        logging.warning(f"WebSocket closed: {code} - {reason}")
-    
-    def on_error(ws, code, reason):
-        print(f"✗ WebSocket error: {code} - {reason}")
-        logging.error(f"WebSocket error: {code} - {reason}")
-    
-    kws.on_ticks = on_ticks
-    kws.on_connect = on_connect
-    kws.on_close = on_close
-    kws.on_error = on_error
-    
-    kws.connect(threaded=True)
-    
-    # Wait for WebSocket
-    print("Waiting for WebSocket connection...")
-    wait_count = 0
-    while not kws.is_connected() and wait_count < 10:
-        time.sleep(1)
-        wait_count += 1
-    
-    if not kws.is_connected():
-        print("WebSocket failed to connect. Exiting.")
-        sys.exit(1)
-    
-    print("✓ WebSocket connected successfully!")
-    time.sleep(3)  # Wait for initial tick data
-    
-    # ==== Start Background Data Update Threads ====
-    print("\n" + "=" * 70)
-    print("STARTING BACKGROUND DATA UPDATE THREADS")
-    print("=" * 70)
-    
-    # Start NSE/NIFTY update thread
-    nse_thread = Thread(
-        target=run_data_update_loop_exchange, 
-        args=('NSE',),
-        daemon=True,
-        name='NSE-UpdateThread'
-    )
-    nse_thread.start()
-    print("✓ NSE (NIFTY) update thread started")
-    
-    # Start BSE/SENSEX update thread
-    bse_thread = Thread(
-        target=run_data_update_loop_exchange, 
-        args=('BSE',),
-        daemon=True,
-        name='BSE-UpdateThread'
-    )
-    bse_thread.start()
-    print("✓ BSE (SENSEX) update thread started")
-    
-    print("\n" + "=" * 70)
-    print("✓ SYSTEM INITIALIZED SUCCESSFULLY!")
-    print("=" * 70)
-    print(f"\n🌐 Web interface will be available at: http://localhost:5000")
-    print("📊 Tracking: NIFTY (NSE) and SENSEX (BSE)")
-    print(f"🔄 Refresh interval: {REFRESH_INTERVAL_SECONDS} seconds")
-    print("💾 Database: Enabled (30-day retention)")
-    print("💰 Underlying prices: Saved with every refresh")
-    print("\nPress Ctrl+C to stop the server\n")
+    except Exception as e:
+        logging.error(f"Error during system initialization: {e}", exc_info=True)
+        global authenticated
+        authenticated = False
 
 if __name__ == '__main__':
     try:
-        initialize_system()
+        # Initialize database
+        db.initialize_database()
+        
         print("\n🌐 Starting Flask-SocketIO server...")
         print("=" * 70)
+        print("🔒 Login required at: http://localhost:5000/login")
+        print("=" * 70)
+        
+        # Don't initialize system here - wait for login
+        # System will be initialized after successful login via initialize_system_async()
         
         # Get server configuration from environment (with defaults)
         flask_host = os.getenv('FLASK_HOST', '0.0.0.0')
