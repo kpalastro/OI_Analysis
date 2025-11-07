@@ -60,6 +60,44 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
+      - name: Validate GitHub Secrets
+        run: |
+          echo "Validating required secrets..."
+          
+          if [ -z "${{ secrets.HOST_IP }}" ]; then
+            echo "❌ Error: HOST_IP secret is not set"
+            echo "Please go to: Settings → Secrets and variables → Actions"
+            echo "Add secret: HOST_IP = aiagents4biz.in (or your server IP)"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.SSH_USER }}" ]; then
+            echo "❌ Error: SSH_USER secret is not set"
+            echo "Please go to: Settings → Secrets and variables → Actions"
+            echo "Add secret: SSH_USER = your_ssh_username"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.SSH_PRIVATE_KEY }}" ]; then
+            echo "❌ Error: SSH_PRIVATE_KEY secret is not set"
+            echo "Please go to: Settings → Secrets and variables → Actions"
+            echo "Add secret: SSH_PRIVATE_KEY = your_private_ssh_key"
+            exit 1
+          fi
+          
+          if [ -z "${{ secrets.DEPLOY_PATH }}" ]; then
+            echo "❌ Error: DEPLOY_PATH secret is not set"
+            echo "Please go to: Settings → Secrets and variables → Actions"
+            echo "Add secret: DEPLOY_PATH = /var/www/oi-tracker"
+            exit 1
+          fi
+          
+          echo "✅ All required secrets are set"
+          echo "HOST_IP: ${{ secrets.HOST_IP }}"
+          echo "SSH_USER: ${{ secrets.SSH_USER }}"
+          echo "DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}"
+          echo "SSH_PRIVATE_KEY: [SET]"
+
       - name: Set up SSH
         env:
           HOST_IP: ${{ secrets.HOST_IP }}
@@ -71,19 +109,22 @@ jobs:
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
           
-          # Add host to known_hosts (skip if HOST_IP is empty)
+          # Verify SSH key was written
+          if [ ! -s ~/.ssh/id_rsa ]; then
+            echo "❌ Error: SSH private key is empty or not set"
+            exit 1
+          fi
+          
+          # Add host to known_hosts
           if [ -n "$HOST_IP" ]; then
+            echo "Adding $HOST_IP to known_hosts..."
             ssh-keyscan -H "$HOST_IP" >> ~/.ssh/known_hosts 2>/dev/null || true
           fi
           
           # Add GitHub to known_hosts
           ssh-keyscan -H github.com >> ~/.ssh/known_hosts 2>/dev/null || true
           
-          # Verify SSH key was written
-          if [ ! -s ~/.ssh/id_rsa ]; then
-            echo "Error: SSH private key is empty or not set"
-            exit 1
-          fi
+          echo "✅ SSH setup completed"
 
       - name: Deploy to server
         env:

@@ -11,16 +11,52 @@ Automated CI/CD pipeline that:
 
 ## Setup Instructions
 
-### 1. Configure GitHub Secrets
+### 1. Configure GitHub Secrets (REQUIRED)
 
-Go to your repository → Settings → Secrets and variables → Actions
+**⚠️ IMPORTANT: Deployment will fail if secrets are not set!**
 
-Add the following secrets:
+Go to your repository → **Settings → Secrets and variables → Actions → New repository secret**
 
-- **SSH_PRIVATE_KEY**: Private SSH key for server access
-- **HOST_IP**: Server IP or domain (aiagents4biz.in)
-- **SSH_USER**: SSH username
-- **DEPLOY_PATH**: Deployment path (/var/www/oi-tracker)
+Add the following 4 secrets:
+
+#### Secret 1: `HOST_IP`
+- **Value**: `aiagents4biz.in` (or your server IP address)
+- **Example**: `aiagents4biz.in` or `192.168.1.100`
+
+#### Secret 2: `SSH_USER`
+- **Value**: Your SSH username on the server
+- **Example**: `ubuntu`, `root`, or `www-data`
+
+#### Secret 3: `SSH_PRIVATE_KEY`
+- **Value**: Your SSH private key content (entire key including `-----BEGIN` and `-----END` lines)
+- **How to generate**:
+  ```bash
+  # On your local machine
+  ssh-keygen -t ed25519 -C "github-actions@aiagents4biz.in" -f ~/.ssh/github_actions_deploy
+  
+  # Display private key (copy entire output including BEGIN/END lines)
+  cat ~/.ssh/github_actions_deploy
+  
+  # Add public key to server
+  ssh-copy-id -i ~/.ssh/github_actions_deploy.pub user@aiagents4biz.in
+  ```
+- **Important**: Copy the ENTIRE key including:
+  ```
+  -----BEGIN OPENSSH PRIVATE KEY-----
+  [key content]
+  -----END OPENSSH PRIVATE KEY-----
+  ```
+
+#### Secret 4: `DEPLOY_PATH`
+- **Value**: `/var/www/oi-tracker`
+- **Example**: `/var/www/oi-tracker`
+
+### 2. Verify Secrets Are Set
+
+After adding secrets, you can verify by:
+1. Going to **Settings → Secrets and variables → Actions**
+2. You should see all 4 secrets listed
+3. The workflow will now validate them before deployment
 
 ### 2. Generate SSH Key for GitHub Actions
 
