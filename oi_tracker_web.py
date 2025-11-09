@@ -11,12 +11,13 @@ import signal
 import atexit
 import os
 from datetime import datetime, date, timedelta, timezone
-from threading import Thread, Lock
+from threading import Thread, Lock, Event
 from typing import Optional
 from zoneinfo import ZoneInfo
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session
 from flask_socketio import SocketIO, emit
 from functools import wraps
+from urllib.parse import unquote
 from kite_trade import *
 from kiteconnect import KiteTicker
 import database as db
@@ -41,6 +42,17 @@ except ImportError as e:
 
 # Load environment variables from .env file
 load_dotenv()
+
+
+def _get_env_float(var_name: str, default: float) -> float:
+    """Safely parse an environment variable as float with a fallback."""
+    value = os.getenv(var_name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
 
 # ==============================================================================
 # --- CONFIGURATION ---
@@ -79,13 +91,33 @@ current_exchange = 'NSE'  # Default to NSE
 
 # --- Data Fetching Parameters ---
 HISTORICAL_DATA_MINUTES = 40
-OI_CHANGE_INTERVALS_MIN = (5, 10, 15, 30)
+OI_CHANGE_INTERVALS_MIN = (3, 5, 10, 15, 30)
+
+# --- Financial Assumptions ---
+RISK_FREE_RATE = 0.08  # 8% annual interest rate
+
+# --- Price Diff Highlight Thresholds ---
+DEFAULT_DIFF_POS_THRESHOLD = 3.0
+DEFAULT_DIFF_NEG_THRESHOLD = 2.0
+DIFF_POS_THRESHOLD = _get_env_float('DIFF_POS_THRESHOLD', DEFAULT_DIFF_POS_THRESHOLD)
+DIFF_NEG_THRESHOLD = _get_env_float('DIFF_NEG_THRESHOLD', DEFAULT_DIFF_NEG_THRESHOLD)
+DIFF_THRESHOLDS = {
+    'positive': DIFF_POS_THRESHOLD,
+    'negative': DIFF_NEG_THRESHOLD
+}
+
+# --- Volatility Instruments ---
+VIX_TOKEN = None
+VIX_FALLBACK_TOKEN = 264969
 
 # --- Display and Logging ---
-REFRESH_INTERVAL_SECONDS = 30  # Refresh interval for data updates
+UI_REFRESH_INTERVAL_SECONDS = 5   # Interval for UI updates
+DB_SAVE_INTERVAL_SECONDS = 30     # Interval for persisting to the database
+WEBSOCKET_THRESHOLD = 30          # Records per option before relying solely on websocket data
 LOG_FILE_NAME = "oi_tracker_web.log"
-FILE_LOG_LEVEL = "DEBUG"  # Changed to DEBUG for detailed diagnostics
+FILE_LOG_LEVEL = "DEBUG"
 PCT_CHANGE_THRESHOLDS = {
+    3: 5.0,
     5: 8.0,
     10: 10.0,
     15: 15.0,
@@ -125,6 +157,58 @@ now = datetime.now()
 def get_exchange_config(exchange):
     return EXCHANGE_CONFIGS[exchange]
 
+def get_shared_feed_symbol(exchange: str) -> Optional[str]:
+    return SHARED_FEED_SYMBOL_MAP.get(exchange)
+
+def _record_tick_metadata(exchange: str, instrument_token: int, event_time: datetime) -> None:
+    if exchange not in latest_tick_metadata:
+        return
+    latest_tick_metadata[exchange][instrument_token] = event_time
+
+def _build_shared_feed_payload(exchange: str, tick: dict, event_time: Optional[datetime]) -> Optional[dict]:
+    symbol_code = get_shared_feed_symbol(exchange)
+    if not symbol_code:
+        return None
+    return {
+        "symbol": symbol_code,
+        "last_price": tick.get('last_price'),
+        "oi": tick.get('oi'),
+        "volume": tick.get('volume'),
+        "timestamp": event_time.isoformat() if event_time else None,
+        "source": "oi_tracker_web"
+    }
+
+def get_latest_tick_for_symbol(symbol_code: str):
+    if not symbol_code:
+        return None, None, None
+
+    normalized = symbol_code.strip().upper()
+    if ':' not in normalized:
+        return None, None, None
+
+    exchange_prefix, symbol_name = normalized.split(':', 1)
+    exchange_prefix = exchange_prefix.strip()
+    symbol_name = symbol_name.strip()
+
+    exchange_key = None
+    for key, config in EXCHANGE_CONFIGS.items():
+        if config['ltp_exchange'] == exchange_prefix and config['underlying_symbol'].upper() == symbol_name:
+            exchange_key = key
+            break
+
+    if not exchange_key:
+        return None, None, None
+
+    underlying_token = exchange_instruments[exchange_key].get('underlying_token')
+    if underlying_token is None:
+        return None, None, None
+
+    with data_lock:
+        tick = latest_tick_data[exchange_key].get(underlying_token)
+        event_time = latest_tick_metadata[exchange_key].get(underlying_token)
+    return tick, event_time, exchange_key
+
+
 # Global objects
 kite = None
 kws = None
@@ -134,6 +218,23 @@ latest_tick_data = {
     'NSE': {},
     'BSE': {}
 }
+
+latest_tick_metadata = {
+    'NSE': {},
+    'BSE': {}
+}
+
+latest_vix_data = {
+    'value': None,
+    'timestamp': None
+}
+
+market_close_processed = {
+    'NSE': False,
+    'BSE': False
+}
+
+shutdown_event = Event()
 
 oi_history = {
     'NSE': {},  # Store OI history from WebSocket ticks: {token: [(timestamp, oi), ...]}
@@ -182,7 +283,9 @@ latest_oi_data = {
         'ml_prediction_pct': None,
         'previous_close': None,
         'previous_close_change': None,
-        'previous_close_change_pct': None
+        'previous_close_change_pct': None,
+        'vix': None,
+        'diff_thresholds': DIFF_THRESHOLDS
     },
     'BSE': {
         'call_options': [],
@@ -201,7 +304,9 @@ latest_oi_data = {
         'ml_prediction_pct': None,
         'previous_close': None,
         'previous_close_change': None,
-        'previous_close_change_pct': None
+        'previous_close_change_pct': None,
+        'vix': None,
+        'diff_thresholds': DIFF_THRESHOLDS
     }
 }
 
@@ -269,6 +374,26 @@ app = Flask(__name__)
 app.config['SECRET_KEY'] = os.getenv('FLASK_SECRET_KEY', 'your-secret-key-change-in-production')
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode='threading')
 
+# Shared feed defaults
+UI_STRINGS = {
+    'survivor_feed_namespace': '/survivor_feed',
+    'survivor_feed_event': 'tick',
+    'survivor_feed_symbol_nifty': 'NSE:NIFTY 50',
+    'survivor_feed_symbol_sensex': 'BSE:SENSEX',
+    'survivor_feed_error_exchange': 'Unsupported symbol format. Use EXCHANGE:SYMBOL.',
+    'survivor_feed_error_not_found': 'Latest price not available for the requested symbol.'
+}
+
+SHARED_FEED_NAMESPACE = UI_STRINGS['survivor_feed_namespace']
+SHARED_FEED_EVENT = UI_STRINGS['survivor_feed_event']
+SHARED_FEED_SYMBOL_MAP = {
+    'NSE': UI_STRINGS['survivor_feed_symbol_nifty'],
+    'BSE': UI_STRINGS['survivor_feed_symbol_sensex']
+}
+
+socketio_stop_lock = Lock()
+socketio_stop_requested = False
+
 # Authentication state
 authenticated = False
 current_enctoken = None
@@ -287,6 +412,25 @@ def get_instrument_token_for_symbol(instruments: list, symbol: str, exchange: st
         return None
     except Exception as e:
         logging.error(f"Error finding instrument token for {symbol}: {e}", exc_info=True)
+        return None
+
+
+def _normalize_symbol(symbol: str) -> str:
+    return ''.join(ch for ch in symbol.upper() if ch.isalnum()) if symbol else ''
+
+
+def find_instrument_token_by_aliases(instruments: list, aliases: list, exchange: str):
+    normalized_aliases = {_normalize_symbol(alias) for alias in aliases if alias}
+    try:
+        for inst in instruments:
+            if inst.get('exchange') != exchange:
+                continue
+            tradingsymbol = inst.get('tradingsymbol')
+            if _normalize_symbol(tradingsymbol) in normalized_aliases:
+                return inst.get('instrument_token')
+        return None
+    except Exception as e:
+        logging.error(f"Error searching aliases {aliases}: {e}", exc_info=True)
         return None
 
 def get_atm_strike(underlying_token: int, strike_diff: int, exchange: str):
@@ -517,6 +661,95 @@ def find_oi_at_timestamp(historical_candles: list, target_time: datetime,
     
     return None
 
+
+def standard_normal_cdf(x: float) -> float:
+    return 0.5 * (1 + math.erf(x / math.sqrt(2)))
+
+
+def standard_normal_pdf(x: float) -> float:
+    return (1 / math.sqrt(2 * math.pi)) * math.exp(-0.5 * x * x)
+
+
+def black_scholes_option_price(option_type: str, spot: float, strike: float,
+                               rate: float, volatility: float, time_years: float) -> Optional[float]:
+    if spot <= 0 or strike <= 0 or volatility <= 0 or time_years <= 0:
+        return None
+    sqrt_time = math.sqrt(time_years)
+    d1 = (math.log(spot / strike) + (rate + 0.5 * volatility ** 2) * time_years) / (volatility * sqrt_time)
+    d2 = d1 - volatility * sqrt_time
+    if option_type.upper() == 'CE':
+        return spot * standard_normal_cdf(d1) - strike * math.exp(-rate * time_years) * standard_normal_cdf(d2)
+    if option_type.upper() == 'PE':
+        return strike * math.exp(-rate * time_years) * standard_normal_cdf(-d2) - spot * standard_normal_cdf(-d1)
+    return None
+
+
+def black_scholes_vega(spot: float, strike: float, rate: float,
+                       volatility: float, time_years: float) -> float:
+    if spot <= 0 or strike <= 0 or volatility <= 0 or time_years <= 0:
+        return 0.0
+    sqrt_time = math.sqrt(time_years)
+    d1 = (math.log(spot / strike) + (rate + 0.5 * volatility ** 2) * time_years) / (volatility * sqrt_time)
+    return spot * standard_normal_pdf(d1) * sqrt_time
+
+
+def calculate_implied_volatility(option_type: str, option_price: float, spot: float,
+                                 strike: float, time_years: float, rate: float = RISK_FREE_RATE,
+                                 initial_vol: float = 0.2, tolerance: float = 1e-4, max_iterations: int = 100):
+    if option_price is None or option_price <= 0:
+        return None
+    if spot is None or spot <= 0 or strike is None or strike <= 0:
+        return None
+    if time_years is None or time_years <= 0:
+        return None
+
+    sigma = max(initial_vol, 1e-4)
+    for _ in range(max_iterations):
+        price = black_scholes_option_price(option_type, spot, strike, rate, sigma, time_years)
+        if price is None:
+            return None
+        price_diff = price - option_price
+        if abs(price_diff) < tolerance:
+            return round(sigma * 100, 2)
+        vega = black_scholes_vega(spot, strike, rate, sigma, time_years)
+        if vega == 0:
+            break
+        sigma -= price_diff / vega
+        if sigma <= 0:
+            sigma = 1e-4
+    return None
+
+
+def compute_theoretical_price(option_type: str, spot: float, strike: float,
+                              time_years: float, option_iv_percent: Optional[float] = None,
+                              vix_percentage: Optional[float] = None,
+                              fallback_volatility: float = 0.2) -> Optional[float]:
+    if spot is None or strike is None or time_years is None:
+        return None
+    if spot <= 0 or strike <= 0 or time_years <= 0:
+        return None
+
+    volatility = None
+    for candidate in (vix_percentage, option_iv_percent):
+        if candidate is None:
+            continue
+        try:
+            candidate_value = float(candidate)
+        except (TypeError, ValueError):
+            continue
+        if candidate_value > 0:
+            volatility = candidate_value / 100.0
+            break
+
+    if volatility is None:
+        volatility = max(fallback_volatility, 1e-4)
+
+    price = black_scholes_option_price(option_type, spot, strike, RISK_FREE_RATE, volatility, time_years)
+    if price is None:
+        return None
+    return round(price, 2)
+
+
 def calculate_oi_differences(raw_historical_data_store: dict, intervals_min: tuple):
     """Calculates OI differences between latest and past intervals."""
     oi_differences_report = {}
@@ -572,38 +805,50 @@ def calculate_oi_differences(raw_historical_data_store: dict, intervals_min: tup
     
     return oi_differences_report
 
-def prepare_web_data(oi_report: dict, contract_details: dict, current_atm_strike: float, 
-                     strike_step: int, num_strikes_each_side: int, exchange: str):
-    """Prepares data structure for web display.
-    Displays only num_strikes_each_side on each side, even though we fetched more.
-    This ensures edge strikes have historical data from the buffer.
-    """
+def prepare_web_data(
+    oi_report: dict,
+    contract_details: dict,
+    current_atm_strike: float,
+    strike_step: int,
+    num_strikes_each_side: int,
+    exchange: str,
+    underlying_price: float = None,
+    time_to_expiry_years: float = None,
+    vix_value: float = None,
+    current_time: datetime = None
+):
+    """Prepare enriched option data for the UI."""
+    if current_time is None:
+        current_time = datetime.now()
+
     call_options = []
     put_options = []
-    
-    # Display only the requested number of strikes (buffer strikes not displayed)
+
     for i in range(-num_strikes_each_side, num_strikes_each_side + 1):
         strike_val = current_atm_strike + (i * strike_step)
-        
-        if i == 0: key_suffix = "atm"
-        elif i < 0: key_suffix = f"itm{-i}"
-        else: key_suffix = f"otm{i}"
-        
-        # Call option data
+
+        if i == 0:
+            key_suffix = "atm"
+        elif i < 0:
+            key_suffix = f"itm{-i}"
+        else:
+            key_suffix = f"otm{i}"
+
         option_key_ce = f"{key_suffix}_ce"
         ce_data = oi_report.get(option_key_ce, {})
         ce_contract = contract_details.get(option_key_ce, {})
-        
+
         ce_latest_oi = ce_data.get('latest_oi')
         ce_latest_oi_time = ce_data.get('latest_oi_timestamp')
-        
-        # Get Call option LTP from tick data
+
         ce_token = ce_contract.get('instrument_token')
         ce_ltp = None
+        ce_volume = None
         if ce_token and ce_token in latest_tick_data[exchange]:
-            ce_ltp = latest_tick_data[exchange][ce_token].get('last_price')
-        
-        # Add token to call row for database storage
+            ce_tick = latest_tick_data[exchange][ce_token]
+            ce_ltp = ce_tick.get('last_price')
+            ce_volume = ce_tick.get('volume')
+
         call_row = {
             'strike': int(ce_contract.get('strike', strike_val)),
             'symbol': ce_contract.get('tradingsymbol', 'N/A'),
@@ -613,30 +858,58 @@ def prepare_web_data(oi_report: dict, contract_details: dict, current_atm_strike
             'strike_type': 'atm' if i == 0 else ('itm' if i < 0 else 'otm'),
             'ltp': ce_ltp,
             'token': ce_token,
-            'pct_changes': {}
+            'pct_changes': {},
+            'iv': None,
+            'theoretical_price': None,
+            'price_diff': None
         }
-        
+        if ce_volume is not None:
+            call_row['volume'] = ce_volume
+
         for interval in OI_CHANGE_INTERVALS_MIN:
             pct_change = ce_data.get(f'pct_diff_{interval}m')
             call_row['pct_changes'][f'{interval}m'] = pct_change
-        
+
+        if ce_ltp is not None and underlying_price is not None and time_to_expiry_years:
+            call_row['iv'] = calculate_implied_volatility(
+                'CE',
+                ce_ltp,
+                underlying_price,
+                call_row['strike'],
+                time_to_expiry_years
+            )
+
+        if underlying_price is not None and time_to_expiry_years:
+            theoretical_price = compute_theoretical_price(
+                'CE',
+                underlying_price,
+                call_row['strike'],
+                time_to_expiry_years,
+                option_iv_percent=call_row['iv'],
+                vix_percentage=vix_value
+            )
+            if theoretical_price is not None:
+                call_row['theoretical_price'] = theoretical_price
+                if ce_ltp is not None:
+                    call_row['price_diff'] = round(ce_ltp - theoretical_price, 2)
+
         call_options.append(call_row)
-        
-        # Put option data
+
         option_key_pe = f"{key_suffix}_pe"
         pe_data = oi_report.get(option_key_pe, {})
         pe_contract = contract_details.get(option_key_pe, {})
-        
+
         pe_latest_oi = pe_data.get('latest_oi')
         pe_latest_oi_time = pe_data.get('latest_oi_timestamp')
-        
-        # Get Put option LTP from tick data
+
         pe_token = pe_contract.get('instrument_token')
         pe_ltp = None
+        pe_volume = None
         if pe_token and pe_token in latest_tick_data[exchange]:
-            pe_ltp = latest_tick_data[exchange][pe_token].get('last_price')
-        
-        # Prepare row data for put table
+            pe_tick = latest_tick_data[exchange][pe_token]
+            pe_ltp = pe_tick.get('last_price')
+            pe_volume = pe_tick.get('volume')
+
         put_row = {
             'strike': int(pe_contract.get('strike', strike_val)),
             'symbol': pe_contract.get('tradingsymbol', 'N/A'),
@@ -646,15 +919,56 @@ def prepare_web_data(oi_report: dict, contract_details: dict, current_atm_strike
             'strike_type': 'atm' if i == 0 else ('itm' if i > 0 else 'otm'),
             'ltp': pe_ltp,
             'token': pe_token,
-            'pct_changes': {}
+            'pct_changes': {},
+            'iv': None,
+            'theoretical_price': None,
+            'price_diff': None
         }
-        
+        if pe_volume is not None:
+            put_row['volume'] = pe_volume
+
         for interval in OI_CHANGE_INTERVALS_MIN:
             pct_change = pe_data.get(f'pct_diff_{interval}m')
             put_row['pct_changes'][f'{interval}m'] = pct_change
-        
+
+        if pe_ltp is not None and underlying_price is not None and time_to_expiry_years:
+            put_row['iv'] = calculate_implied_volatility(
+                'PE',
+                pe_ltp,
+                underlying_price,
+                put_row['strike'],
+                time_to_expiry_years
+            )
+
+        if underlying_price is not None and time_to_expiry_years:
+            theoretical_price = compute_theoretical_price(
+                'PE',
+                underlying_price,
+                put_row['strike'],
+                time_to_expiry_years,
+                option_iv_percent=put_row['iv'],
+                vix_percentage=vix_value
+            )
+            if theoretical_price is not None:
+                put_row['theoretical_price'] = theoretical_price
+                if pe_ltp is not None:
+                    put_row['price_diff'] = round(pe_ltp - theoretical_price, 2)
+
         put_options.append(put_row)
-    
+
+    def annotate_neighbor_oi_changes(options_list):
+        strike_to_change = {
+            opt['strike']: opt.get('pct_changes', {}).get('5m')
+            for opt in options_list
+        }
+        for opt in options_list:
+            strike = opt['strike']
+            opt['strike_minus_100_oi_change'] = strike_to_change.get(strike - 100)
+            opt['strike_plus_100_oi_change'] = strike_to_change.get(strike + 100)
+
+    annotate_neighbor_oi_changes(call_options)
+    annotate_neighbor_oi_changes(put_options)
+
     return call_options, put_options
 
 # ==============================================================================
@@ -822,6 +1136,9 @@ def run_data_update_loop_exchange(exchange):
     expiry_date = exchange_instruments[exchange]['expiry_date']
     symbol_prefix = exchange_instruments[exchange]['symbol_prefix']
     
+    last_db_save_time = datetime.now()
+    db_save_counter = 0
+
     logging.info(f"{exchange}: Data update thread started")
     
     while True:
@@ -838,7 +1155,7 @@ def run_data_update_loop_exchange(exchange):
             if not current_atm_strike:
                 with data_lock:
                     latest_oi_data[exchange]['status'] = 'Error: Could not determine ATM strike'
-                time.sleep(REFRESH_INTERVAL_SECONDS)
+                time.sleep(UI_REFRESH_INTERVAL_SECONDS)
                 continue
             
             # Get option contracts around ATM
@@ -856,7 +1173,7 @@ def run_data_update_loop_exchange(exchange):
             if not option_contract_details:
                 with data_lock:
                     latest_oi_data[exchange]['status'] = f'Warning: No contracts found for ATM {int(current_atm_strike)}'
-                time.sleep(REFRESH_INTERVAL_SECONDS)
+                time.sleep(UI_REFRESH_INTERVAL_SECONDS)
                 continue
             
             # Extract option tokens
@@ -880,11 +1197,15 @@ def run_data_update_loop_exchange(exchange):
             # Prepare web data
             call_options, put_options = prepare_web_data(
                 oi_change_data, 
-                option_contract_details, 
-                current_atm_strike,
-                config['strike_difference'], 
-                config['options_count'],
-                exchange
+            option_contract_details,
+            current_atm_strike,
+            config['strike_difference'],
+            config['options_count'],
+            exchange,
+            underlying_price=underlying_ltp,
+            time_to_expiry_years=time_to_expiry_years,
+            vix_value=latest_vix_data['value'],
+            current_time=current_iteration_time
             )
             
             # Get underlying LTP
@@ -967,6 +1288,8 @@ def run_data_update_loop_exchange(exchange):
                 latest_oi_data[exchange]['previous_close'] = round(float(prev_close_price), 2) if prev_close_price else None
                 latest_oi_data[exchange]['previous_close_change'] = round(float(price_change), 2) if price_change is not None else None
                 latest_oi_data[exchange]['previous_close_change_pct'] = round(float(price_change_pct), 2) if price_change_pct is not None else None
+                latest_oi_data[exchange]['vix'] = latest_vix_data['value']
+                latest_oi_data[exchange]['diff_thresholds'] = DIFF_THRESHOLDS
                 if ml_prediction_data:
                     latest_oi_data[exchange]['ml_prediction'] = ml_prediction_data['prediction']
                     latest_oi_data[exchange]['ml_prediction_pct'] = ml_prediction_data['prediction_pct']
@@ -977,14 +1300,17 @@ def run_data_update_loop_exchange(exchange):
             
             # Save to database (including underlying price and ATM strike)
             current_timestamp = datetime.now()
-            db.save_option_chain_snapshot(
-                exchange, 
-                call_options, 
-                put_options, 
-                underlying_price=underlying_ltp,
-                atm_strike=current_atm_strike,
-                timestamp=current_timestamp
-            )
+            if (current_timestamp - last_db_save_time).total_seconds() >= DB_SAVE_INTERVAL_SECONDS:
+                db.save_option_chain_snapshot(
+                    exchange,
+                    call_options,
+                    put_options,
+                    underlying_price=underlying_ltp,
+                    atm_strike=current_atm_strike,
+                    timestamp=current_timestamp
+                )
+                last_db_save_time = current_timestamp
+                db_save_counter += 1
             
             # Emit update to all connected clients (include positions data)
             with data_lock:
@@ -997,13 +1323,13 @@ def run_data_update_loop_exchange(exchange):
             socketio.emit(f'data_update_{exchange}', emit_data)
             
             logging.info(f"{exchange}: ✓ Data updated. ATM: {current_atm_strike}, PCR: {pcr}")
-            time.sleep(REFRESH_INTERVAL_SECONDS)
+            time.sleep(UI_REFRESH_INTERVAL_SECONDS)
             
         except Exception as e:
             logging.error(f"{exchange}: Error in data update loop: {e}", exc_info=True)
             with data_lock:
                 latest_oi_data[exchange]['status'] = f'Error: {str(e)}'
-            time.sleep(REFRESH_INTERVAL_SECONDS)
+            time.sleep(UI_REFRESH_INTERVAL_SECONDS)
 
 # ==============================================================================
 # --- FLASK ROUTES ---
@@ -1538,6 +1864,26 @@ def get_exchange_data(exchange):
     with data_lock:
         return jsonify(latest_oi_data[exchange])
 
+
+@app.route('/api/latest-price/<path:symbol>', methods=['GET'])
+def api_latest_price(symbol):
+    """Expose latest underlying LTP for the requested symbol (e.g. NSE:NIFTY 50)."""
+    decoded_symbol = unquote(symbol)
+    normalized_symbol = decoded_symbol.strip().upper()
+
+    if ':' not in normalized_symbol:
+        return jsonify({"error": UI_STRINGS['survivor_feed_error_exchange']}), 400
+
+    tick, event_time, exchange_key = get_latest_tick_for_symbol(decoded_symbol)
+    if tick is None or exchange_key is None:
+        return jsonify({"error": UI_STRINGS['survivor_feed_error_not_found']}), 404
+
+    payload = _build_shared_feed_payload(exchange_key, tick, event_time)
+    if payload is None:
+        return jsonify({"error": UI_STRINGS['survivor_feed_error_not_found']}), 404
+
+    return jsonify(payload)
+
 @app.route('/api/place_order', methods=['POST'])
 def place_order():
     """API endpoint to place a paper trading order (exchange-specific)."""
@@ -1723,7 +2069,7 @@ def start_auto_shutdown_monitor():
 
 def initialize_system_async():
     """Initialize the trading system asynchronously after login."""
-    global kite, kws, exchange_instruments, latest_oi_data, oi_history
+    global kite, kws, exchange_instruments, latest_oi_data, oi_history, latest_vix_data, VIX_TOKEN
     global ml_predictor, ml_signal_generator, ml_feature_engineer, ml_models_loaded
     
     if not kite:
@@ -1757,12 +2103,24 @@ def initialize_system_async():
             return
         logging.info(f"✓ Fetched {len(nfo_instruments)} NFO instruments")
         
-        logging.info("Fetching NSE instruments...")
         nse_instruments = kite.instruments('NSE')
         if not nse_instruments:
             logging.error("Failed to fetch NSE instruments.")
             return
         logging.info(f"✓ Fetched {len(nse_instruments)} NSE instruments")
+
+        # Resolve India VIX instrument token dynamically
+        vix_aliases = ['INDIAVIX', 'INDIA VIX', 'INDA VIX', 'INDAVIX']
+        resolved_vix_token = find_instrument_token_by_aliases(nse_instruments, vix_aliases, 'NSE')
+        if resolved_vix_token:
+            VIX_TOKEN = resolved_vix_token
+            logging.info(f"✓ Resolved INDIAVIX token: {VIX_TOKEN}")
+        else:
+            VIX_TOKEN = VIX_FALLBACK_TOKEN
+            if VIX_TOKEN:
+                logging.warning(f"Unable to resolve INDIAVIX token. Using fallback token: {VIX_TOKEN}")
+            else:
+                logging.warning("Unable to resolve INDIAVIX token. VIX display will remain unavailable.")
         
         # Get NIFTY underlying token
         nifty_config = EXCHANGE_CONFIGS['NSE']
@@ -1872,12 +2230,19 @@ def initialize_system_async():
         
         def on_ticks(ws, ticks):
             """Handle incoming tick data for both exchanges."""
-            global latest_tick_data, oi_history
+            global latest_tick_data, oi_history, latest_vix_data
             current_time = datetime.now()  # Use timezone-naive for consistency with historical API
             
             for tick in ticks:
                 instrument_token = tick.get('instrument_token')
                 if not instrument_token:
+                    continue
+
+                if VIX_TOKEN and instrument_token == VIX_TOKEN:
+                    last_price = tick.get('last_price')
+                    if last_price is not None:
+                        latest_vix_data['value'] = last_price
+                        latest_vix_data['timestamp'] = current_time
                     continue
                 
                 # Determine which exchange this token belongs to
@@ -1903,7 +2268,12 @@ def initialize_system_async():
                         continue
                 
                 # Store tick data
+                feed_payload = None
                 latest_tick_data[exchange][instrument_token] = tick
+                _record_tick_metadata(exchange, instrument_token, current_time)
+
+                if instrument_token == exchange_instruments[exchange].get('underlying_token'):
+                    feed_payload = _build_shared_feed_payload(exchange, tick, current_time)
                 
                 # Store OI history if available (MODE_FULL provides OI)
                 if 'oi' in tick and tick['oi'] is not None:
@@ -1926,6 +2296,9 @@ def initialize_system_async():
                     # Log first few OI entries to verify data accumulation
                     if len(oi_history[exchange][instrument_token]) <= 3:
                         logging.info(f"{exchange}: Accumulating OI for token {instrument_token}: {len(oi_history[exchange][instrument_token])} records")
+
+                if feed_payload:
+                    socketio.emit(SHARED_FEED_EVENT, feed_payload, namespace=SHARED_FEED_NAMESPACE)
     
         def on_connect(ws, response):
             """Subscribe to both NIFTY and SENSEX underlying tokens on connection."""
@@ -1937,9 +2310,15 @@ def initialize_system_async():
             nifty_token = exchange_instruments['NSE']['underlying_token']
             sensex_token = exchange_instruments['BSE']['underlying_token']
             
-            ws.subscribe([nifty_token, sensex_token])
-            ws.set_mode(ws.MODE_QUOTE, [nifty_token, sensex_token])
-            logging.info(f"✓ Subscribed to NIFTY (token: {nifty_token}) and SENSEX (token: {sensex_token})")
+            tokens = [nifty_token, sensex_token]
+            if VIX_TOKEN:
+                tokens.append(VIX_TOKEN)
+            ws.subscribe(tokens)
+            ws.set_mode(ws.MODE_QUOTE, tokens)
+            if VIX_TOKEN:
+                logging.info(f"✓ Subscribed to NIFTY (token: {nifty_token}), SENSEX (token: {sensex_token}), and VIX (token: {VIX_TOKEN})")
+            else:
+                logging.info(f"✓ Subscribed to NIFTY (token: {nifty_token}) and SENSEX (token: {sensex_token})")
         
         def on_close(ws, code, reason):
             global ws_connected
@@ -2018,7 +2397,7 @@ def initialize_system_async():
         logging.info("✓ SYSTEM INITIALIZED SUCCESSFULLY!")
         logging.info("=" * 70)
         logging.info(f"📊 Tracking: NIFTY (NSE) and SENSEX (BSE)")
-        logging.info(f"🔄 Refresh interval: {REFRESH_INTERVAL_SECONDS} seconds")
+        logging.info(f"🔄 Refresh interval: {UI_REFRESH_INTERVAL_SECONDS} seconds")
         if ml_models_loaded:
             logging.info("🤖 ML Predictions: Enabled")
         logging.info("💾 Database: Enabled (30-day retention)")
