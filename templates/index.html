@@ -135,6 +135,20 @@
             color: var(--text-primary);
         }
 
+        .info-item .subvalue {
+            margin-top: 2px;
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+        }
+
+        .info-item .subvalue.positive {
+            color: #38ef7d;
+        }
+
+        .info-item .subvalue.negative {
+            color: #f45c43;
+        }
+
         /* Tab Content - Full Height */
         .tab-content {
             flex: 1;
@@ -226,6 +240,37 @@
         .strike-itm { color: var(--itm-color); }
         .strike-atm { color: var(--atm-color); font-size: 1.1em; }
         .strike-otm { color: var(--otm-color); }
+
+        .mny-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            min-width: 44px;
+            text-align: center;
+        }
+
+        .mny-itm {
+            color: var(--itm-color);
+            border-color: rgba(76, 201, 240, 0.4);
+            background: rgba(76, 201, 240, 0.12);
+        }
+
+        .mny-atm {
+            color: var(--atm-color);
+            border-color: rgba(56, 178, 172, 0.5);
+            background: rgba(56, 178, 172, 0.18);
+        }
+
+        .mny-otm {
+            color: var(--otm-color);
+            border-color: rgba(244, 114, 182, 0.4);
+            background: rgba(244, 114, 182, 0.10);
+        }
 
         .pct-change {
             padding: 2px 6px;
@@ -507,6 +552,11 @@
                             <div class="value" id="niftyPrice">--</div>
                         </div>
                         <div class="info-item">
+                            <div class="label">Prev Close</div>
+                            <div class="value" id="prevCloseNSE">--</div>
+                            <div class="subvalue" id="prevCloseChangeNSE">--</div>
+                        </div>
+                        <div class="info-item">
                             <div class="label">ATM</div>
                             <div class="value" id="atmStrikeNSE">--</div>
                         </div>
@@ -594,6 +644,11 @@
                         <div class="info-item">
                             <div class="label">SENSEX</div>
                             <div class="value" id="sensexPrice">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">Prev Close</div>
+                            <div class="value" id="prevCloseBSE">--</div>
+                            <div class="subvalue" id="prevCloseChangeBSE">--</div>
                         </div>
                         <div class="info-item">
                             <div class="label">ATM</div>
@@ -754,7 +809,8 @@
                         method: 'POST',
                         headers: {
                             'Content-Type': 'application/json'
-                        }
+                        },
+                        credentials: 'include'
                     });
                     const result = await response.json();
                     if (result.success) {
@@ -779,9 +835,32 @@
                 document.getElementById(`atmStrike${suffix}`).textContent = data.atm_strike;
             }
             
-            if (data.underlying_price) {
+            if (data.underlying_price != null) {
                 const priceId = exchange === 'NSE' ? 'niftyPrice' : 'sensexPrice';
-                document.getElementById(priceId).textContent = data.underlying_price;
+                document.getElementById(priceId).textContent = data.underlying_price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            }
+
+            const prevCloseEl = document.getElementById(`prevClose${suffix}`);
+            const prevChangeEl = document.getElementById(`prevCloseChange${suffix}`);
+            if (prevCloseEl) {
+                if (data.previous_close != null) {
+                    prevCloseEl.textContent = '₹' + Number(data.previous_close).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                } else {
+                    prevCloseEl.textContent = '--';
+                }
+            }
+            if (prevChangeEl) {
+                if (data.previous_close_change != null && data.previous_close_change_pct != null) {
+                    const changeVal = Number(data.previous_close_change);
+                    const changePct = Number(data.previous_close_change_pct);
+                    const changeText = `${changeVal >= 0 ? '+' : '-'}₹${Math.abs(changeVal).toFixed(2)}`;
+                    const pctText = `${changePct >= 0 ? '+' : '-'}${Math.abs(changePct).toFixed(2)}%`;
+                    prevChangeEl.textContent = `${changeText} (${pctText})`;
+                    prevChangeEl.className = `subvalue ${changeVal >= 0 ? 'positive' : 'negative'}`;
+                } else {
+                    prevChangeEl.textContent = '--';
+                    prevChangeEl.className = 'subvalue';
+                }
             }
             
             if (data.pcr != null) {
@@ -883,7 +962,9 @@
             });
             html += '<th>OI</th>';
             html += '<th>Price</th>';
+            html += '<th>MNY</th>';
             html += '<th class="strike-column">STRIKE</th>';
+            html += '<th>MNY</th>';
             html += '<th>Price</th>';
             html += '<th>OI</th>';
             intervals.forEach(interval => {
@@ -894,7 +975,10 @@
             
             callOptions.forEach((callOpt, index) => {
                 const putOpt = putOptions[index] || {};
-                const rowClass = callOpt.strike_type === 'atm' ? ' atm-row' : '';
+                const rawCallMny = callOpt.moneyness || (callOpt.strike_type ? callOpt.strike_type.toUpperCase() : '');
+                const callMny = rawCallMny ? rawCallMny.toUpperCase() : '';
+                const callMnyClass = callMny ? callMny.toLowerCase() : '';
+                const rowClass = callMny === 'ATM' ? ' atm-row' : '';
                 html += `<tr class="${rowClass}">`;
                 
                 reversedIntervals.forEach(interval => {
@@ -921,9 +1005,15 @@
                 } else {
                     html += `<td>${callPrice}</td>`;
                 }
+                html += `<td><span class="mny-badge mny-${callMnyClass || 'atm'}">${callMny || '--'}</span></td>`;
                 
-                const strikeClass = `strike-${callOpt.strike_type}`;
+                const strikeClass = `strike-${callMnyClass || 'atm'}`;
                 html += `<td class="strike-column ${strikeClass}">${callOpt.strike}</td>`;
+                
+                const rawPutMny = putOpt.moneyness || (putOpt.strike_type ? putOpt.strike_type.toUpperCase() : '');
+                const putMny = rawPutMny ? rawPutMny.toUpperCase() : '';
+                const putMnyClass = putMny ? putMny.toLowerCase() : '';
+                html += `<td><span class="mny-badge mny-${putMnyClass || 'atm'}">${putMny || '--'}</span></td>`;
                 
                 const putPrice = putOpt.ltp != null ? putOpt.ltp.toFixed(1) : 'N/A';
                 if (putPrice !== 'N/A') {

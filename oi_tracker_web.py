@@ -11,12 +11,13 @@ import os
 from datetime import datetime, date, timedelta, timezone
 from threading import Thread, Lock
 from zoneinfo import ZoneInfo
-from flask import Flask, render_template, jsonify, request, redirect, url_for
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session
 from flask_socketio import SocketIO, emit
 from functools import wraps
 from kite_trade import *
 from kiteconnect import KiteTicker
 import database as db
+from database import get_previous_close_price
 from dotenv import load_dotenv
 
 # ML System imports
@@ -162,7 +163,10 @@ latest_oi_data = {
         'ml_prediction': None,
         'ml_signal': None,
         'ml_confidence': None,
-        'ml_prediction_pct': None
+        'ml_prediction_pct': None,
+        'previous_close': None,
+        'previous_close_change': None,
+        'previous_close_change_pct': None
     },
     'BSE': {
         'call_options': [],
@@ -178,9 +182,29 @@ latest_oi_data = {
         'ml_prediction': None,
         'ml_signal': None,
         'ml_confidence': None,
-        'ml_prediction_pct': None
+        'ml_prediction_pct': None,
+        'previous_close': None,
+        'previous_close_change': None,
+        'previous_close_change_pct': None
     }
 }
+
+previous_close_cache = {
+    'NSE': {'date': None, 'price': None},
+    'BSE': {'date': None, 'price': None}
+}
+
+# Previous close helper
+def get_cached_previous_close(exchange):
+    cache = previous_close_cache.setdefault(exchange, {'date': None, 'price': None})
+    today = date.today()
+
+    if cache['date'] != today or cache['price'] is None:
+        price = get_previous_close_price(exchange)
+        cache['price'] = price
+        cache['date'] = today
+
+    return cache['price']
 
 # ML System objects (initialized later)
 ml_predictor = None
@@ -555,6 +579,7 @@ def prepare_web_data(oi_report: dict, contract_details: dict, current_atm_strike
             'symbol': ce_contract.get('tradingsymbol', 'N/A'),
             'latest_oi': ce_latest_oi,
             'oi_time': ce_latest_oi_time.strftime("%H:%M:%S") if ce_latest_oi_time else None,
+            'moneyness': 'ATM' if i == 0 else ('ITM' if i < 0 else 'OTM'),
             'strike_type': 'atm' if i == 0 else ('itm' if i < 0 else 'otm'),
             'ltp': ce_ltp,
             'token': ce_token,
@@ -581,11 +606,13 @@ def prepare_web_data(oi_report: dict, contract_details: dict, current_atm_strike
         if pe_token and pe_token in latest_tick_data[exchange]:
             pe_ltp = latest_tick_data[exchange][pe_token].get('last_price')
         
+        # Prepare row data for put table
         put_row = {
             'strike': int(pe_contract.get('strike', strike_val)),
             'symbol': pe_contract.get('tradingsymbol', 'N/A'),
             'latest_oi': pe_latest_oi,
             'oi_time': pe_latest_oi_time.strftime("%H:%M:%S") if pe_latest_oi_time else None,
+            'moneyness': 'ATM' if i == 0 else ('ITM' if i > 0 else 'OTM'),
             'strike_type': 'atm' if i == 0 else ('itm' if i > 0 else 'otm'),
             'ltp': pe_ltp,
             'token': pe_token,
@@ -839,7 +866,15 @@ def run_data_update_loop_exchange(exchange):
             total_put_oi = sum(opt['latest_oi'] for opt in put_options if opt['latest_oi'] is not None)
             total_call_oi = sum(opt['latest_oi'] for opt in call_options if opt['latest_oi'] is not None)
             pcr = round(total_put_oi / total_call_oi, 2) if total_call_oi > 0 else None
-            
+
+            prev_close_price = get_cached_previous_close(exchange)
+            price_change = None
+            price_change_pct = None
+            if underlying_ltp is not None and prev_close_price:
+                price_change = underlying_ltp - prev_close_price
+                if prev_close_price:
+                    price_change_pct = (price_change / prev_close_price) * 100
+
             # Monitor open positions and auto-exit if needed
             monitor_positions(call_options, put_options, exchange)
             
@@ -895,10 +930,13 @@ def run_data_update_loop_exchange(exchange):
                 latest_oi_data[exchange]['call_options'] = call_options
                 latest_oi_data[exchange]['put_options'] = put_options
                 latest_oi_data[exchange]['atm_strike'] = int(current_atm_strike)
-                latest_oi_data[exchange]['underlying_price'] = int(underlying_ltp) if underlying_ltp else None
+                latest_oi_data[exchange]['underlying_price'] = round(float(underlying_ltp), 2) if underlying_ltp is not None else None
                 latest_oi_data[exchange]['last_update'] = datetime.now().strftime('%H:%M:%S')
                 latest_oi_data[exchange]['status'] = 'Live'
                 latest_oi_data[exchange]['pcr'] = pcr
+                latest_oi_data[exchange]['previous_close'] = round(float(prev_close_price), 2) if prev_close_price else None
+                latest_oi_data[exchange]['previous_close_change'] = round(float(price_change), 2) if price_change is not None else None
+                latest_oi_data[exchange]['previous_close_change_pct'] = round(float(price_change_pct), 2) if price_change_pct is not None else None
                 if ml_prediction_data:
                     latest_oi_data[exchange]['ml_prediction'] = ml_prediction_data['prediction']
                     latest_oi_data[exchange]['ml_prediction_pct'] = ml_prediction_data['prediction_pct']
@@ -946,7 +984,7 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         global authenticated
-        if not authenticated:
+        if not session.get('authenticated') or not authenticated:
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
@@ -955,7 +993,7 @@ def login_required(f):
 def login():
     """Login page route."""
     global authenticated, USER_ID
-    if authenticated:
+    if session.get('authenticated') and authenticated:
         return redirect(url_for('index'))
     # Pass USER_ID from .env if available (for convenience, but user can override)
     return render_template('login.html', default_user_id=USER_ID if USER_ID else '')
@@ -993,7 +1031,10 @@ def api_login():
             authenticated = True
             current_enctoken = enctoken
             kite = kite_instance
-            
+            session['authenticated'] = True
+            session['user_id'] = profile.get('user_id')
+            session['user_name'] = profile.get('user_name')
+ 
             # Start initialization in background
             Thread(target=initialize_system_async, daemon=True).start()
             
@@ -1020,14 +1061,19 @@ def api_logout():
     authenticated = False
     current_enctoken = None
     kite = None
+    session.clear()
     
     # Close WebSocket connections
     if kws:
         try:
+            print("\n🔌 Closing WebSocket connection...")
+            logging.info("Closing WebSocket connection")
             kws.close()
-        except:
-            pass
-        kws = None
+            print("✓ WebSocket connection closed successfully")
+            logging.info("WebSocket connection closed successfully")
+        except Exception as e:
+            print(f"⚠ Error closing WebSocket: {e}")
+            logging.warning(f"Error closing WebSocket: {e}")
     
     return jsonify({'success': True, 'message': 'Logged out successfully'})
 
@@ -1488,7 +1534,13 @@ def initialize_system_async():
         # Verify connection
         profile = kite.profile()
         logging.info(f"✓ Connected as: {profile.get('user_id')} ({profile.get('user_name')})")
-        
+
+        # Prime previous close cache for both exchanges
+        for exch in ['NSE', 'BSE']:
+            prev_close = get_cached_previous_close(exch)
+            if prev_close is not None:
+                latest_oi_data[exch]['previous_close'] = round(float(prev_close), 2)
+
         # ==== NSE/NIFTY Instruments ====
         logging.info("\n" + "=" * 70)
         logging.info("FETCHING NSE/NIFTY INSTRUMENTS")
