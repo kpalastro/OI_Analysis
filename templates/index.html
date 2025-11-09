@@ -227,6 +227,37 @@
         .strike-atm { color: var(--atm-color); font-size: 1.1em; }
         .strike-otm { color: var(--otm-color); }
 
+        .mny-badge {
+            display: inline-block;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 0.7rem;
+            font-weight: 700;
+            letter-spacing: 0.05em;
+            background: rgba(255, 255, 255, 0.08);
+            border: 1px solid rgba(255, 255, 255, 0.12);
+            min-width: 44px;
+            text-align: center;
+        }
+
+        .mny-itm {
+            color: var(--itm-color);
+            border-color: rgba(76, 201, 240, 0.4);
+            background: rgba(76, 201, 240, 0.12);
+        }
+
+        .mny-atm {
+            color: var(--atm-color);
+            border-color: rgba(56, 178, 172, 0.5);
+            background: rgba(56, 178, 172, 0.18);
+        }
+
+        .mny-otm {
+            color: var(--otm-color);
+            border-color: rgba(244, 114, 182, 0.4);
+            background: rgba(244, 114, 182, 0.10);
+        }
+
         .pct-change {
             padding: 2px 6px;
             border-radius: 3px;
@@ -883,7 +914,9 @@
             });
             html += '<th>OI</th>';
             html += '<th>Price</th>';
+            html += '<th>MNY</th>';
             html += '<th class="strike-column">STRIKE</th>';
+            html += '<th>MNY</th>';
             html += '<th>Price</th>';
             html += '<th>OI</th>';
             intervals.forEach(interval => {
@@ -894,7 +927,10 @@
             
             callOptions.forEach((callOpt, index) => {
                 const putOpt = putOptions[index] || {};
-                const rowClass = callOpt.strike_type === 'atm' ? ' atm-row' : '';
+                const rawCallMny = callOpt.moneyness || (callOpt.strike_type ? callOpt.strike_type.toUpperCase() : '');
+                const callMny = rawCallMny ? rawCallMny.toUpperCase() : '';
+                const callMnyClass = callMny ? callMny.toLowerCase() : '';
+                const rowClass = callMny === 'ATM' ? ' atm-row' : '';
                 html += `<tr class="${rowClass}">`;
                 
                 reversedIntervals.forEach(interval => {
@@ -921,9 +957,15 @@
                 } else {
                     html += `<td>${callPrice}</td>`;
                 }
+                html += `<td><span class="mny-badge mny-${callMnyClass || 'atm'}">${callMny || '--'}</span></td>`;
                 
-                const strikeClass = `strike-${callOpt.strike_type}`;
+                const strikeClass = `strike-${callMnyClass || 'atm'}`;
                 html += `<td class="strike-column ${strikeClass}">${callOpt.strike}</td>`;
+                
+                const rawPutMny = putOpt.moneyness || (putOpt.strike_type ? putOpt.strike_type.toUpperCase() : '');
+                const putMny = rawPutMny ? rawPutMny.toUpperCase() : '';
+                const putMnyClass = putMny ? putMny.toLowerCase() : '';
+                html += `<td><span class="mny-badge mny-${putMnyClass || 'atm'}">${putMny || '--'}</span></td>`;
                 
                 const putPrice = putOpt.ltp != null ? putOpt.ltp.toFixed(1) : 'N/A';
                 if (putPrice !== 'N/A') {

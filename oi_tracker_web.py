@@ -547,6 +547,7 @@ def prepare_web_data(oi_report: dict, contract_details: dict, current_atm_strike
             'symbol': ce_contract.get('tradingsymbol', 'N/A'),
             'latest_oi': ce_latest_oi,
             'oi_time': ce_latest_oi_time.strftime("%H:%M:%S") if ce_latest_oi_time else None,
+            'moneyness': 'ATM' if i == 0 else ('ITM' if i < 0 else 'OTM'),
             'strike_type': 'atm' if i == 0 else ('itm' if i < 0 else 'otm'),
             'ltp': ce_ltp,
             'token': ce_token,
@@ -573,11 +574,13 @@ def prepare_web_data(oi_report: dict, contract_details: dict, current_atm_strike
         if pe_token and pe_token in latest_tick_data[exchange]:
             pe_ltp = latest_tick_data[exchange][pe_token].get('last_price')
         
+        # Prepare row data for put table
         put_row = {
             'strike': int(pe_contract.get('strike', strike_val)),
             'symbol': pe_contract.get('tradingsymbol', 'N/A'),
             'latest_oi': pe_latest_oi,
             'oi_time': pe_latest_oi_time.strftime("%H:%M:%S") if pe_latest_oi_time else None,
+            'moneyness': 'ATM' if i == 0 else ('ITM' if i > 0 else 'OTM'),
             'strike_type': 'atm' if i == 0 else ('itm' if i > 0 else 'otm'),
             'ltp': pe_ltp,
             'token': pe_token,
