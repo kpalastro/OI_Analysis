@@ -1,0 +1,515 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Historical OI Analysis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <style>
+        .analysis-container {
+            padding: 24px;
+            max-width: 1400px;
+            margin: 0 auto;
+        }
+
+        .analysis-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 16px;
+        }
+
+        .analysis-header h1 {
+            margin: 0;
+            font-size: 1.8rem;
+            color: #ffffff;
+        }
+
+        body {
+            background-color: #0f172a;
+            color: #e2e8f0;
+        }
+
+        .analysis-form {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            background-color: rgba(30, 41, 59, 0.88);
+            padding: 16px;
+            border-radius: 12px;
+            margin-bottom: 20px;
+            border: 1px solid rgba(148, 163, 184, 0.2);
+        }
+
+        .analysis-form label {
+            display: block;
+            font-size: 0.85rem;
+            color: #cbd5f5;
+            margin-bottom: 6px;
+        }
+
+        .analysis-form input,
+        .analysis-form select {
+            width: 100%;
+            padding: 10px 12px;
+            border-radius: 8px;
+            border: 1px solid rgba(148, 163, 184, 0.3);
+            background-color: rgba(15, 23, 42, 0.75);
+            color: #e2e8f0;
+        }
+
+        .analysis-form button {
+            padding: 12px 16px;
+            background: linear-gradient(135deg, #6366f1, #22d3ee);
+            color: #ffffff;
+            border: none;
+            border-radius: 10px;
+            cursor: pointer;
+            font-weight: 600;
+            transition: transform 0.2s ease, box-shadow 0.2s ease;
+            align-self: end;
+        }
+
+        .analysis-form button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 10px 20px rgba(37, 99, 235, 0.25);
+        }
+
+        .chart-card {
+            background-color: rgba(30, 41, 59, 0.92);
+            border-radius: 16px;
+            padding: 16px;
+            margin-bottom: 20px;
+            box-shadow: 0 12px 35px rgba(15, 23, 42, 0.55);
+            border: 1px solid rgba(148, 163, 184, 0.15);
+        }
+
+        .chart-card h2 {
+            font-size: 1.1rem;
+            color: #cbd5f5;
+            margin-bottom: 12px;
+        }
+
+        .chart-placeholder {
+            height: 420px;
+        }
+
+        .empty-state {
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            color: rgba(226, 232, 240, 0.75);
+            font-size: 0.95rem;
+            background: linear-gradient(135deg, rgba(51, 65, 85, 0.25), rgba(30, 41, 59, 0.2));
+            border-radius: 12px;
+            border: 1px dashed rgba(148, 163, 184, 0.3);
+        }
+
+        .status-message {
+            margin-bottom: 16px;
+            padding: 12px 16px;
+            border-radius: 10px;
+            display: none;
+        }
+
+        .status-message.visible {
+            display: block;
+        }
+
+        .status-success {
+            background-color: rgba(22, 163, 74, 0.15);
+            color: #bbf7d0;
+            border: 1px solid rgba(22, 163, 74, 0.4);
+        }
+
+        .status-warning {
+            background-color: rgba(202, 138, 4, 0.15);
+            color: #fcd34d;
+            border: 1px solid rgba(202, 138, 4, 0.4);
+        }
+
+        .status-error {
+            background-color: rgba(220, 38, 38, 0.15);
+            color: #fca5a5;
+            border: 1px solid rgba(220, 38, 38, 0.4);
+        }
+
+        .navigation-links {
+            display: flex;
+            gap: 12px;
+        }
+
+        .navigation-links a {
+            color: #93c5fd;
+            text-decoration: none;
+            font-weight: 500;
+        }
+
+        @media (max-width: 768px) {
+            .analysis-header {
+                flex-direction: column;
+                align-items: flex-start;
+                gap: 12px;
+            }
+
+            .analysis-form {
+                grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            }
+
+            .chart-placeholder {
+                height: 360px;
+            }
+        }
+    </style>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
+</head>
+<body>
+    <div class="analysis-container">
+        <div class="analysis-header">
+            <h1>Historical OI Analysis</h1>
+            <div class="navigation-links">
+                <a href="{{ url_for('index') }}">Dashboard</a>
+                <span>•</span>
+                <a href="{{ url_for('backtest_page') }}">Backtest</a>
+            </div>
+        </div>
+
+        <form id="analysisForm" class="analysis-form">
+            <div>
+                <label for="exchangeSelect">Exchange</label>
+                <select id="exchangeSelect" name="exchange" required>
+                    {% for exch in exchanges %}
+                    <option value="{{ exch }}" {% if exch == default_exchange %}selected{% endif %}>{{ exch }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <label for="startInput">Start (Local Time)</label>
+                <input type="datetime-local" id="startInput" name="start" required>
+            </div>
+            <div>
+                <label for="endInput">End (Local Time)</label>
+                <input type="datetime-local" id="endInput" name="end" required>
+            </div>
+            <div>
+                <label for="resampleSelect">Resample Interval</label>
+                <select id="resampleSelect" name="resample">
+                    <option value="">None</option>
+                    <option value="5min" selected>5 min</option>
+                    <option value="15min">15 min</option>
+                    <option value="30min">30 min</option>
+                    <option value="60min">60 min</option>
+                </select>
+            </div>
+            <div>
+                <label for="optionTypeSelect">Heatmap Option Type</label>
+                <select id="optionTypeSelect" name="option_type">
+                    <option value="CE">Calls (CE)</option>
+                    <option value="PE">Puts (PE)</option>
+                </select>
+            </div>
+            <div>
+                <label for="valueColumnSelect">Heatmap Metric</label>
+                <select id="valueColumnSelect" name="value_column">
+                    {% for item in value_columns %}
+                    <option value="{{ item.value }}" {% if loop.first %}selected{% endif %}>{{ item.label }}</option>
+                    {% endfor %}
+                </select>
+            </div>
+            <div>
+                <button type="submit" id="loadAnalysisBtn">Load Analysis</button>
+            </div>
+        </form>
+
+        <div id="analysisStatus" class="status-message"></div>
+
+        <div class="chart-card">
+            <h2>Underlying Price vs Open Interest</h2>
+            <div id="underlyingChart" class="chart-placeholder"></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Net OI Δ vs Underlying Return</h2>
+            <div id="scatterChart" class="chart-placeholder"></div>
+        </div>
+
+        <div class="chart-card">
+            <h2>Strike Heatmap</h2>
+            <div id="heatmapChart" class="chart-placeholder"></div>
+        </div>
+    </div>
+
+    <script>
+        const statusEl = document.getElementById('analysisStatus');
+        const formEl = document.getElementById('analysisForm');
+        const loadBtn = document.getElementById('loadAnalysisBtn');
+        const startInput = document.getElementById('startInput');
+        const endInput = document.getElementById('endInput');
+        const exchangeSelect = document.getElementById('exchangeSelect');
+        const resampleSelect = document.getElementById('resampleSelect');
+        const optionTypeSelect = document.getElementById('optionTypeSelect');
+        const valueColumnSelect = document.getElementById('valueColumnSelect');
+
+        const formatDateValue = (date) => {
+            const pad = (n) => `${n}`.padStart(2, '0');
+            return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+        };
+
+        const setStatus = (message, type = 'success') => {
+            if (!message) {
+                statusEl.classList.remove('visible', 'status-success', 'status-warning', 'status-error');
+                statusEl.textContent = '';
+                return;
+            }
+            const classMap = {
+                success: 'status-success',
+                warning: 'status-warning',
+                error: 'status-error'
+            };
+            statusEl.className = `status-message visible ${classMap[type] || 'status-success'}`;
+            statusEl.textContent = message;
+        };
+
+        const preprocessSummary = (summary) => {
+            if (!Array.isArray(summary) || summary.length === 0) {
+                return { timestamps: [], underlying: [], callOi: [], putOi: [], pcr: [], netOi: [], returns: [] };
+            }
+            const timestamps = summary.map(d => d.timestamp);
+            const underlying = summary.map(d => d.underlying_price ?? null);
+            const callOi = summary.map(d => d.call_oi ?? null);
+            const putOi = summary.map(d => d.put_oi ?? null);
+            const pcr = summary.map(d => d.pcr ?? null);
+            const netOi = summary.map(d => d.net_oi ?? null);
+            const returns = summary.map(d => d.underlying_return_pct ?? null);
+            return { timestamps, underlying, callOi, putOi, pcr, netOi, returns };
+        };
+
+        const renderUnderlyingChart = (summaryData, exchange) => {
+            const { timestamps, underlying, callOi, putOi, pcr } = summaryData;
+            const chartEl = document.getElementById('underlyingChart');
+            chartEl.innerHTML = '';
+
+            if (!timestamps.length) {
+                Plotly.purge('underlyingChart');
+                chartEl.innerHTML = '<div class="empty-state">No underlying / OI data for the selected range.</div>';
+                return;
+            }
+
+            const traces = [
+                {
+                    x: timestamps, y: underlying,
+                    mode: 'lines', name: 'Underlying Price', yaxis: 'y1',
+                    line: { color: '#f59e0b', width: 2 }
+                }
+            ];
+
+            if (callOi.some(v => v !== null)) {
+                traces.push({
+                    x: timestamps, y: callOi,
+                    mode: 'lines', name: 'Call OI', yaxis: 'y2',
+                    line: { color: '#3b82f6', dash: 'dash' }
+                });
+            }
+
+            if (putOi.some(v => v !== null)) {
+                traces.push({
+                    x: timestamps, y: putOi,
+                    mode: 'lines', name: 'Put OI', yaxis: 'y2',
+                    line: { color: '#ef4444', dash: 'dot' }
+                });
+            }
+
+            if (pcr.some(v => v !== null)) {
+                traces.push({
+                    x: timestamps, y: pcr,
+                    mode: 'lines', name: 'PCR', yaxis: 'y3',
+                    line: { color: '#10b981', width: 1.5 }
+                });
+            }
+
+            Plotly.newPlot('underlyingChart', traces, {
+                paper_bgcolor: 'rgba(13, 18, 31, 0.95)',
+                plot_bgcolor: 'rgba(13, 18, 31, 0.95)',
+                font: { color: '#e2e8f0' },
+                title: `Underlying vs Open Interest – ${exchange}`,
+                xaxis: { title: 'Timestamp', gridcolor: 'rgba(148, 163, 184, 0.25)' },
+                yaxis: {
+                    title: 'Underlying Price',
+                    titlefont: { color: '#f59e0b' },
+                    tickfont: { color: '#f59e0b' },
+                    gridcolor: 'rgba(148, 163, 184, 0.18)'
+                },
+                yaxis2: {
+                    title: 'Open Interest',
+                    titlefont: { color: '#3b82f6' },
+                    tickfont: { color: '#3b82f6' },
+                    overlaying: 'y',
+                    side: 'right'
+                },
+                yaxis3: {
+                    title: 'PCR',
+                    titlefont: { color: '#10b981' },
+                    tickfont: { color: '#10b981' },
+                    overlaying: 'y',
+                    side: 'right',
+                    anchor: 'free',
+                    position: 1.0
+                },
+                legend: { orientation: 'h', y: 1.1, x: 1, xanchor: 'right', font: { color: '#e2e8f0' } },
+                margin: { l: 60, r: 80, t: 60, b: 60 }
+            }, { responsive: true });
+        };
+
+        const renderScatterChart = (summaryData, exchange) => {
+            const { netOi, returns, timestamps } = summaryData;
+            const scatterEl = document.getElementById('scatterChart');
+            scatterEl.innerHTML = '';
+            if (netOi.length < 2) {
+                Plotly.purge('scatterChart');
+                scatterEl.innerHTML = '<div class="empty-state">Not enough points to plot net OI change.</div>';
+                return;
+            }
+
+            const netOiChange = netOi.map((value, idx, arr) => idx === 0 ? null : (value !== null && arr[idx - 1] !== null ? value - arr[idx - 1] : null));
+            const points = netOiChange.map((value, idx) => ({
+                x: value, y: returns[idx], timestamp: timestamps[idx]
+            })).filter(item => item.x !== null && item.y !== null);
+
+            if (!points.length) {
+                Plotly.purge('scatterChart');
+                scatterEl.innerHTML = '<div class="empty-state">Net OI vs return scatter will appear once the dataset has meaningful deltas.</div>';
+                return;
+            }
+
+            Plotly.newPlot('scatterChart', [{
+                x: points.map(p => p.x),
+                y: points.map(p => p.y),
+                mode: 'markers',
+                text: points.map(p => p.timestamp),
+                marker: {
+                    size: 9,
+                    color: points.map(p => p.y),
+                    colorscale: 'RdYlGn',
+                    showscale: true,
+                    colorbar: { title: 'Underlying Price % Δ' },
+                    line: { color: '#0f172a', width: 1 }
+                },
+                hovertemplate: 'Net OI Δ: %{x:.2f}<br>Return %: %{y:.3f}<br>%{text}<extra></extra>'
+            }], {
+                paper_bgcolor: 'rgba(13, 18, 31, 0.95)',
+                plot_bgcolor: 'rgba(13, 18, 31, 0.95)',
+                font: { color: '#e2e8f0' },
+                title: `Net OI Δ vs Underlying Return – ${exchange}`,
+                xaxis: { title: 'Net OI Δ', zeroline: false, gridcolor: 'rgba(148, 163, 184, 0.25)' },
+                yaxis: { title: 'Underlying Price % Δ', zeroline: false, gridcolor: 'rgba(148, 163, 184, 0.25)' },
+                margin: { l: 60, r: 40, t: 60, b: 60 }
+            }, { responsive: true });
+        };
+
+        const renderHeatmap = (heatmapData, exchange) => {
+            const heatmapEl = document.getElementById('heatmapChart');
+            heatmapEl.innerHTML = '';
+            if (!heatmapData || !heatmapData.values || !heatmapData.values.length || !heatmapData.values.some(row => row.some(v => v !== null))) {
+                Plotly.purge('heatmapChart');
+                heatmapEl.innerHTML = '<div class="empty-state">Heatmap data is unavailable for the selected filters. Try a different metric or timeframe.</div>';
+                return;
+            }
+
+            heatmapEl.innerHTML = '';
+
+            Plotly.newPlot('heatmapChart', [{
+                type: 'heatmap',
+                x: heatmapData.timestamps,
+                y: heatmapData.strikes,
+                z: heatmapData.values,
+                colorscale: 'RdBu',
+                reversescale: true,
+                colorbar: { title: heatmapData.value_label || heatmapData.value_column }
+            }], {
+                paper_bgcolor: 'rgba(13, 18, 31, 0.95)',
+                plot_bgcolor: 'rgba(13, 18, 31, 0.95)',
+                font: { color: '#e2e8f0' },
+                title: `Heatmap – ${exchange} (${heatmapData.value_label || heatmapData.value_column})`,
+                xaxis: { title: 'Timestamp', gridcolor: 'rgba(148, 163, 184, 0.25)' },
+                yaxis: { title: 'Strike', gridcolor: 'rgba(148, 163, 184, 0.25)' },
+                margin: { l: 80, r: 60, t: 60, b: 80 }
+            }, { responsive: true });
+        };
+
+        const loadAnalysis = async () => {
+            const params = new URLSearchParams({
+                exchange: exchangeSelect.value,
+                start: startInput.value,
+                end: endInput.value,
+                resample: resampleSelect.value,
+                option_type: optionTypeSelect.value,
+                value_column: valueColumnSelect.value
+            });
+
+            setStatus('Loading analysis…', 'warning');
+            loadBtn.disabled = true;
+
+            try {
+                const response = await fetch(`/api/analysis/summary?${params.toString()}`);
+                const payload = await response.json();
+
+                if (!response.ok || !payload.success) {
+                    throw new Error(payload.error || 'Unable to load analysis');
+                }
+
+                if (!payload.data) {
+                    setStatus(payload.message || 'No data found for the selected range.', 'warning');
+                    Plotly.purge('underlyingChart');
+                    Plotly.purge('scatterChart');
+                    Plotly.purge('heatmapChart');
+                    return;
+                }
+
+                const summaryData = preprocessSummary(payload.data.summary);
+                renderUnderlyingChart(summaryData, payload.data.exchange);
+                renderScatterChart(summaryData, payload.data.exchange);
+                renderHeatmap(payload.data.heatmap, payload.data.exchange);
+
+                if (payload.message) {
+                    setStatus(payload.message, 'warning');
+                } else if (payload.warnings && payload.warnings.length) {
+                    setStatus(payload.warnings.join(' '), 'warning');
+                } else {
+                    setStatus(`Loaded ${payload.data.meta.records} summary points from ${payload.data.meta.raw_rows} rows.`, 'success');
+                }
+            } catch (error) {
+                console.error(error);
+                setStatus(error.message, 'error');
+            } finally {
+                loadBtn.disabled = false;
+            }
+        };
+
+        formEl.addEventListener('submit', (event) => {
+            event.preventDefault();
+            loadAnalysis();
+        });
+
+        const initialiseDateFields = () => {
+            const now = new Date();
+            const start = new Date(now.getTime());
+            start.setHours(9, 15, 0, 0);
+            const end = new Date(now.getTime());
+            end.setHours(15, 30, 0, 0);
+            if (now < start) {
+                start.setDate(start.getDate() - 1);
+                end.setDate(end.getDate() - 1);
+            }
+            startInput.value = formatDateValue(start);
+            endInput.value = formatDateValue(end);
+        };
+
+        document.addEventListener('DOMContentLoaded', () => {
+            initialiseDateFields();
+            loadAnalysis();
+        });
+    </script>
+</body>
+</html>
+

@@ -5,11 +5,14 @@ import logging
 import sys
 import time
 import pandas as pd
+import numpy as np
+import math
 import signal
 import atexit
 import os
 from datetime import datetime, date, timedelta, timezone
 from threading import Thread, Lock
+from typing import Optional
 from zoneinfo import ZoneInfo
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session
 from flask_socketio import SocketIO, emit
@@ -19,6 +22,10 @@ from kiteconnect import KiteTicker
 import database as db
 from database import get_previous_close_price
 from dotenv import load_dotenv
+try:
+    from analysis import OIBackAnalysisPipeline
+except ImportError:
+    OIBackAnalysisPipeline = None
 
 # ML System imports
 try:
@@ -83,6 +90,15 @@ PCT_CHANGE_THRESHOLDS = {
     10: 10.0,
     15: 15.0,
     30: 25.0
+}
+
+HEATMAP_VALUE_LABELS = {
+    'pct_change_5m': 'OI % change (5 min)',
+    'pct_change_10m': 'OI % change (10 min)',
+    'pct_change_15m': 'OI % change (15 min)',
+    'pct_change_30m': 'OI % change (30 min)',
+    'oi': 'Open Interest',
+    'ltp': 'Last Traded Price'
 }
 
 # --- Auto Shutdown Configuration ---
@@ -211,6 +227,20 @@ ml_predictor = None
 ml_signal_generator = None
 ml_feature_engineer = None
 ml_models_loaded = False
+analysis_pipeline = None
+
+
+def get_analysis_pipeline():
+    """Lazily initialise analysis pipeline with configured database path."""
+    global analysis_pipeline
+
+    if OIBackAnalysisPipeline is None:
+        raise RuntimeError("Analysis tools are not available on this deployment.")
+
+    if analysis_pipeline is None:
+        db_path = os.getenv("OI_TRACKER_DB_PATH", os.path.join(os.path.dirname(__file__), "oi_tracker.db"))
+        analysis_pipeline = OIBackAnalysisPipeline(db_path=db_path)
+    return analysis_pipeline
 
 # Paper Trading: Open Positions (per exchange)
 # Structure: {exchange: {position_id: {symbol, type, side, entry_price, qty, entry_time, current_price, mtm}}}
@@ -1097,6 +1127,23 @@ def backtest_page():
                           exchanges=['NSE', 'BSE'],
                           exchange_configs=EXCHANGE_CONFIGS)
 
+
+@app.route('/analysis')
+@login_required
+def analysis_page():
+    """Historical analysis page route."""
+    default_exchange = 'NSE'
+    return render_template(
+        'analysis.html',
+        exchanges=['NSE', 'BSE'],
+        default_exchange=default_exchange,
+        oi_intervals=[5, 10, 15, 30],
+        value_columns=[
+            {'value': key, 'label': label}
+            for key, label in HEATMAP_VALUE_LABELS.items()
+        ]
+    )
+
 @app.route('/api/backtest', methods=['POST'])
 def run_backtest():
     """API endpoint to run backtest."""
@@ -1315,6 +1362,163 @@ def run_backtest():
     except Exception as e:
         logging.error(f"Backtest error: {e}", exc_info=True)
         return jsonify({'error': str(e)}), 500
+
+
+def _ensure_authenticated_api():
+    if not session.get('authenticated') or not authenticated:
+        return False
+    return True
+
+
+def _parse_datetime_param(value: Optional[str]) -> Optional[datetime]:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(value)
+    except ValueError:
+        try:
+            return datetime.strptime(value, '%Y-%m-%d %H:%M')
+        except ValueError:
+            return None
+
+
+def _serialize_metric(value):
+    if value is None:
+        return None
+    if isinstance(value, (np.floating, float)):
+        if math.isnan(float(value)):
+            return None
+        return float(value)
+    if isinstance(value, (np.integer, int)):
+        return int(value)
+    if isinstance(value, pd.Timestamp):
+        return value.to_pydatetime().isoformat()
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return value
+
+
+@app.route('/api/analysis/summary', methods=['GET'])
+def api_analysis_summary():
+    """Provide aggregated OI summary and heatmap-ready data."""
+    if not _ensure_authenticated_api():
+        return jsonify({'success': False, 'error': 'Not authenticated'}), 401
+
+    if OIBackAnalysisPipeline is None:
+        return jsonify({'success': False, 'error': 'Analysis tools not available'}), 503
+
+    try:
+        exchange = request.args.get('exchange', 'NSE').upper()
+        if exchange not in EXCHANGE_CONFIGS:
+            return jsonify({'success': False, 'error': 'Invalid exchange'}), 400
+
+        start_dt = _parse_datetime_param(request.args.get('start'))
+        end_dt = _parse_datetime_param(request.args.get('end'))
+        if start_dt and end_dt and start_dt >= end_dt:
+            return jsonify({'success': False, 'error': 'Start time must be before end time'}), 400
+
+        resample_rule = request.args.get('resample') or None
+        option_type = request.args.get('option_type', 'CE').upper()
+        value_column = request.args.get('value_column', 'pct_change_5m')
+
+        pipeline = get_analysis_pipeline()
+        snapshots = pipeline.fetch_snapshots(exchange=exchange, start=start_dt, end=end_dt)
+
+        if snapshots.empty:
+            return jsonify({'success': True, 'data': None, 'message': 'No data found for the selected window'})
+
+        summary_df = pipeline.build_summary_table(
+            snapshots,
+            resample_rule=resample_rule,
+            include_pct_changes=True
+        )
+
+        summary_payload = []
+        if not summary_df.empty:
+            for _, row in summary_df.iterrows():
+                timestamp = row.get('timestamp')
+                record = {}
+                for key, value in row.items():
+                    if key == 'timestamp':
+                        continue
+                    record[key] = None if pd.isna(value) else _serialize_metric(value)
+                record['timestamp'] = timestamp.isoformat() if isinstance(timestamp, datetime) else (
+                    timestamp.to_pydatetime().isoformat() if isinstance(timestamp, pd.Timestamp) else str(timestamp)
+                )
+                summary_payload.append(record)
+
+        heatmap_payload = None
+        try:
+            heatmap_matrix = pipeline.build_strike_heatmap(
+                snapshots,
+                option_type=option_type,
+                value_column=value_column
+            )
+            if not heatmap_matrix.empty:
+                value_label = HEATMAP_VALUE_LABELS.get(value_column, value_column)
+                strikes = [
+                    float(strike) if isinstance(strike, (int, float, np.number)) else strike
+                    for strike in heatmap_matrix.index.tolist()
+                ]
+                timestamps = [
+                    ts.isoformat() if isinstance(ts, datetime) else (
+                        ts.to_pydatetime().isoformat() if isinstance(ts, pd.Timestamp) else str(ts)
+                    )
+                    for ts in heatmap_matrix.columns.tolist()
+                ]
+                matrix_values = heatmap_matrix.to_numpy()
+                values = [
+                    [_serialize_metric(cell) for cell in row]
+                    for row in matrix_values
+                ]
+                heatmap_payload = {
+                    'strikes': strikes,
+                    'timestamps': timestamps,
+                    'values': values,
+                    'value_column': value_column,
+                    'value_label': value_label
+                }
+        except ValueError as e:
+            logging.warning(f"Heatmap generation failed: {e}")
+
+        response = {
+            'success': True,
+            'data': {
+                'exchange': exchange,
+                'summary': summary_payload,
+                'heatmap': heatmap_payload,
+                'meta': {
+                    'records': len(summary_payload),
+                    'raw_rows': len(snapshots),
+                    'option_type': option_type,
+                    'value_column': value_column,
+                    'value_label': HEATMAP_VALUE_LABELS.get(value_column, value_column),
+                    'resample_rule': resample_rule,
+                    'options': {
+                        'option_types': ['CE', 'PE'],
+                        'value_columns': [
+                            {'value': key, 'label': label}
+                            for key, label in HEATMAP_VALUE_LABELS.items()
+                        ]
+                    }
+                }
+            }
+        }
+
+        if not summary_payload:
+            response['message'] = 'No summary data available for selected window'
+
+        if heatmap_payload is None:
+            response.setdefault('warnings', []).append('Heatmap unavailable for the selected parameters')
+
+        return jsonify(response)
+
+    except FileNotFoundError as e:
+        logging.error(f"Analysis pipeline error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+    except Exception as e:
+        logging.error(f"Analysis summary error: {e}", exc_info=True)
+        return jsonify({'success': False, 'error': 'Failed to generate analysis summary'}), 500
 
 @app.route('/api/data')
 def get_data():
@@ -1831,7 +2035,7 @@ if __name__ == '__main__':
         db.initialize_database()
 
         # Start auto shutdown monitor before launching the server
-        start_auto_shutdown_monitor()
+        #start_auto_shutdown_monitor()
         
         print("\n🌐 Starting Flask-SocketIO server...")
         print("=" * 70)

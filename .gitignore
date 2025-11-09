@@ -47,4 +47,5 @@ ml_system/training/reports/*.csv
 deploy/.env
 *.backup
 backups/
+exports/
 
