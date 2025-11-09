@@ -10,6 +10,7 @@ import atexit
 import os
 from datetime import datetime, date, timedelta, timezone
 from threading import Thread, Lock
+from zoneinfo import ZoneInfo
 from flask import Flask, render_template, jsonify, request, redirect, url_for
 from flask_socketio import SocketIO, emit
 from functools import wraps
@@ -83,6 +84,12 @@ PCT_CHANGE_THRESHOLDS = {
     30: 25.0
 }
 
+# --- Auto Shutdown Configuration ---
+AUTO_SHUTDOWN_ENABLED = True
+AUTO_SHUTDOWN_IST_HOUR = 15
+AUTO_SHUTDOWN_IST_MINUTE = 30
+AUTO_SHUTDOWN_CHECK_INTERVAL_SECONDS = 30
+
 # ==============================================================================
 # --- GLOBAL VARIABLES ---
 # ==============================================================================
@@ -119,6 +126,7 @@ oi_history = {
 ws_connected = False
 data_lock = Lock()
 cleanup_done = False  # Flag to prevent duplicate cleanup
+auto_shutdown_triggered = False
 
 # Currently active instruments and tokens per exchange
 exchange_instruments = {
@@ -1417,6 +1425,49 @@ signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C
 signal.signal(signal.SIGTERM, signal_handler)  # Termination signal
 
 # ==============================================================================
+# --- AUTO SHUTDOWN MONITOR ---
+# ==============================================================================
+
+def start_auto_shutdown_monitor():
+    """Start background thread that terminates the application at 15:30 IST."""
+    if not AUTO_SHUTDOWN_ENABLED:
+        logging.info("Auto-shutdown monitor disabled.")
+        return
+
+    def monitor_shutdown():
+        global auto_shutdown_triggered
+        logging.info("Auto-shutdown monitor started (15:30 IST).")
+        target_datetime = None
+
+        while not auto_shutdown_triggered:
+            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+
+            if target_datetime is None or now_ist.date() != target_datetime.date():
+                target_datetime = now_ist.replace(
+                    hour=AUTO_SHUTDOWN_IST_HOUR,
+                    minute=AUTO_SHUTDOWN_IST_MINUTE,
+                    second=0,
+                    microsecond=0
+                )
+
+            if now_ist >= target_datetime:
+                auto_shutdown_triggered = True
+                message = "⏰ Auto shutdown triggered at 15:30 IST. Cleaning up..."
+                print(f"\n{message}")
+                logging.info("Auto shutdown triggered at 15:30 IST.")
+                cleanup_connections()
+                os._exit(0)
+
+            time.sleep(AUTO_SHUTDOWN_CHECK_INTERVAL_SECONDS)
+
+    shutdown_thread = Thread(
+        target=monitor_shutdown,
+        daemon=True,
+        name="AutoShutdownMonitor"
+    )
+    shutdown_thread.start()
+
+# ==============================================================================
 # --- MAIN INITIALIZATION ---
 # ==============================================================================
 
@@ -1726,6 +1777,9 @@ if __name__ == '__main__':
     try:
         # Initialize database
         db.initialize_database()
+
+        # Start auto shutdown monitor before launching the server
+        start_auto_shutdown_monitor()
         
         print("\n🌐 Starting Flask-SocketIO server...")
         print("=" * 70)
