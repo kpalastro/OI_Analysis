@@ -131,7 +131,8 @@ jobs:
           HOST_IP: ${{ secrets.HOST_IP }}
           SSH_USER: ${{ secrets.SSH_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
-          REPO_URL: https://github.com/${{ github.repository }}.git
+          REPO_URL: git@github.com:kpalastro/${{ github.repository }}.git
+          # https://github.com/${{ github.repository }}.git
           TARGET_BRANCH: main
         run: |
           # Verify SSH connection first
