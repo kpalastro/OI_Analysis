@@ -135,6 +135,20 @@
             color: var(--text-primary);
         }
 
+        .info-item .subvalue {
+            margin-top: 2px;
+            font-size: 0.7rem;
+            color: var(--text-secondary);
+        }
+
+        .info-item .subvalue.positive {
+            color: #38ef7d;
+        }
+
+        .info-item .subvalue.negative {
+            color: #f45c43;
+        }
+
         /* Tab Content - Full Height */
         .tab-content {
             flex: 1;
@@ -538,6 +552,11 @@
                             <div class="value" id="niftyPrice">--</div>
                         </div>
                         <div class="info-item">
+                            <div class="label">Prev Close</div>
+                            <div class="value" id="prevCloseNSE">--</div>
+                            <div class="subvalue" id="prevCloseChangeNSE">--</div>
+                        </div>
+                        <div class="info-item">
                             <div class="label">ATM</div>
                             <div class="value" id="atmStrikeNSE">--</div>
                         </div>
@@ -625,6 +644,11 @@
                         <div class="info-item">
                             <div class="label">SENSEX</div>
                             <div class="value" id="sensexPrice">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">Prev Close</div>
+                            <div class="value" id="prevCloseBSE">--</div>
+                            <div class="subvalue" id="prevCloseChangeBSE">--</div>
                         </div>
                         <div class="info-item">
                             <div class="label">ATM</div>
@@ -810,9 +834,32 @@
                 document.getElementById(`atmStrike${suffix}`).textContent = data.atm_strike;
             }
             
-            if (data.underlying_price) {
+            if (data.underlying_price != null) {
                 const priceId = exchange === 'NSE' ? 'niftyPrice' : 'sensexPrice';
-                document.getElementById(priceId).textContent = data.underlying_price;
+                document.getElementById(priceId).textContent = data.underlying_price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+            }
+
+            const prevCloseEl = document.getElementById(`prevClose${suffix}`);
+            const prevChangeEl = document.getElementById(`prevCloseChange${suffix}`);
+            if (prevCloseEl) {
+                if (data.previous_close != null) {
+                    prevCloseEl.textContent = '₹' + Number(data.previous_close).toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+                } else {
+                    prevCloseEl.textContent = '--';
+                }
+            }
+            if (prevChangeEl) {
+                if (data.previous_close_change != null && data.previous_close_change_pct != null) {
+                    const changeVal = Number(data.previous_close_change);
+                    const changePct = Number(data.previous_close_change_pct);
+                    const changeText = `${changeVal >= 0 ? '+' : '-'}₹${Math.abs(changeVal).toFixed(2)}`;
+                    const pctText = `${changePct >= 0 ? '+' : '-'}${Math.abs(changePct).toFixed(2)}%`;
+                    prevChangeEl.textContent = `${changeText} (${pctText})`;
+                    prevChangeEl.className = `subvalue ${changeVal >= 0 ? 'positive' : 'negative'}`;
+                } else {
+                    prevChangeEl.textContent = '--';
+                    prevChangeEl.className = 'subvalue';
+                }
             }
             
             if (data.pcr != null) {

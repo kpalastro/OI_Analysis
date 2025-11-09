@@ -154,7 +154,10 @@ latest_oi_data = {
         'ml_prediction': None,
         'ml_signal': None,
         'ml_confidence': None,
-        'ml_prediction_pct': None
+        'ml_prediction_pct': None,
+        'previous_close': None,
+        'previous_close_change': None,
+        'previous_close_change_pct': None
     },
     'BSE': {
         'call_options': [],
@@ -170,8 +173,16 @@ latest_oi_data = {
         'ml_prediction': None,
         'ml_signal': None,
         'ml_confidence': None,
-        'ml_prediction_pct': None
+        'ml_prediction_pct': None,
+        'previous_close': None,
+        'previous_close_change': None,
+        'previous_close_change_pct': None
     }
+}
+
+previous_close_cache = {
+    'NSE': {'date': None, 'price': None},
+    'BSE': {'date': None, 'price': None}
 }
 
 # ML System objects (initialized later)
@@ -834,7 +845,15 @@ def run_data_update_loop_exchange(exchange):
             total_put_oi = sum(opt['latest_oi'] for opt in put_options if opt['latest_oi'] is not None)
             total_call_oi = sum(opt['latest_oi'] for opt in call_options if opt['latest_oi'] is not None)
             pcr = round(total_put_oi / total_call_oi, 2) if total_call_oi > 0 else None
-            
+
+            prev_close_price = get_cached_previous_close(exchange)
+            price_change = None
+            price_change_pct = None
+            if underlying_ltp is not None and prev_close_price:
+                price_change = underlying_ltp - prev_close_price
+                if prev_close_price:
+                    price_change_pct = (price_change / prev_close_price) * 100
+
             # Monitor open positions and auto-exit if needed
             monitor_positions(call_options, put_options, exchange)
             
@@ -890,10 +909,13 @@ def run_data_update_loop_exchange(exchange):
                 latest_oi_data[exchange]['call_options'] = call_options
                 latest_oi_data[exchange]['put_options'] = put_options
                 latest_oi_data[exchange]['atm_strike'] = int(current_atm_strike)
-                latest_oi_data[exchange]['underlying_price'] = int(underlying_ltp) if underlying_ltp else None
+                latest_oi_data[exchange]['underlying_price'] = round(float(underlying_ltp), 2) if underlying_ltp is not None else None
                 latest_oi_data[exchange]['last_update'] = datetime.now().strftime('%H:%M:%S')
                 latest_oi_data[exchange]['status'] = 'Live'
                 latest_oi_data[exchange]['pcr'] = pcr
+                latest_oi_data[exchange]['previous_close'] = round(float(prev_close_price), 2) if prev_close_price else None
+                latest_oi_data[exchange]['previous_close_change'] = round(float(price_change), 2) if price_change is not None else None
+                latest_oi_data[exchange]['previous_close_change_pct'] = round(float(price_change_pct), 2) if price_change_pct is not None else None
                 if ml_prediction_data:
                     latest_oi_data[exchange]['ml_prediction'] = ml_prediction_data['prediction']
                     latest_oi_data[exchange]['ml_prediction_pct'] = ml_prediction_data['prediction_pct']
@@ -1440,7 +1462,13 @@ def initialize_system_async():
         # Verify connection
         profile = kite.profile()
         logging.info(f"✓ Connected as: {profile.get('user_id')} ({profile.get('user_name')})")
-        
+
+        # Prime previous close cache for both exchanges
+        for exch in ['NSE', 'BSE']:
+            prev_close = get_cached_previous_close(exch)
+            if prev_close is not None:
+                latest_oi_data[exch]['previous_close'] = round(float(prev_close), 2)
+
         # ==== NSE/NIFTY Instruments ====
         logging.info("\n" + "=" * 70)
         logging.info("FETCHING NSE/NIFTY INSTRUMENTS")

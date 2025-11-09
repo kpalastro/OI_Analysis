@@ -102,6 +102,11 @@ html += `<tr${rowClass}>`;
 └──────────────────────────────────────────────────────────────────┘
 ```
 
+### 2025-11-09 — Previous Close Insight
+- Added “Prev Close” tile for both NSE & BSE dashboards (auto refresh each day)
+- Shows absolute/percentage change from yesterday’s close with color cues
+- Backend computes and caches previous close from historical snapshots
+
 ## Technical Details
 
 ### Grid Layout Proportions

@@ -362,6 +362,34 @@ def load_today_snapshots(exchange):
             logging.error(f"Error loading today's snapshots for {exchange}: {e}", exc_info=True)
             return {}
 
+
+def get_previous_close_price(exchange):
+    """Return the most recent underlying price from a previous day for the exchange."""
+    with db_lock:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                """
+                SELECT underlying_price
+                FROM option_chain_snapshots
+                WHERE exchange = ?
+                  AND underlying_price IS NOT NULL
+                  AND DATE(timestamp) < DATE('now')
+                ORDER BY timestamp DESC
+                LIMIT 1
+                """,
+                (exchange,)
+            )
+            row = cursor.fetchone()
+            conn.close()
+            if row and row[0] is not None:
+                return float(row[0])
+            return None
+        except Exception as e:
+            logging.warning(f"Could not fetch previous close for {exchange}: {e}")
+            return None
+
 def should_load_from_db(exchange):
     """
     Determine if we should load from database based on 30-minute gap rule.
