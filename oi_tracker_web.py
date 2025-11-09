@@ -10,7 +10,7 @@ import atexit
 import os
 from datetime import datetime, date, timedelta, timezone
 from threading import Thread, Lock
-from flask import Flask, render_template, jsonify, request, redirect, url_for
+from flask import Flask, render_template, jsonify, request, redirect, url_for, session
 from flask_socketio import SocketIO, emit
 from functools import wraps
 from kite_trade import *
@@ -963,7 +963,7 @@ def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
         global authenticated
-        if not authenticated:
+        if not session.get('authenticated') or not authenticated:
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
@@ -972,7 +972,7 @@ def login_required(f):
 def login():
     """Login page route."""
     global authenticated, USER_ID
-    if authenticated:
+    if session.get('authenticated') and authenticated:
         return redirect(url_for('index'))
     # Pass USER_ID from .env if available (for convenience, but user can override)
     return render_template('login.html', default_user_id=USER_ID if USER_ID else '')
@@ -1010,7 +1010,10 @@ def api_login():
             authenticated = True
             current_enctoken = enctoken
             kite = kite_instance
-            
+            session['authenticated'] = True
+            session['user_id'] = profile.get('user_id')
+            session['user_name'] = profile.get('user_name')
+ 
             # Start initialization in background
             Thread(target=initialize_system_async, daemon=True).start()
             
@@ -1037,14 +1040,19 @@ def api_logout():
     authenticated = False
     current_enctoken = None
     kite = None
+    session.clear()
     
     # Close WebSocket connections
     if kws:
         try:
+            print("\n🔌 Closing WebSocket connection...")
+            logging.info("Closing WebSocket connection")
             kws.close()
-        except:
-            pass
-        kws = None
+            print("✓ WebSocket connection closed successfully")
+            logging.info("WebSocket connection closed successfully")
+        except Exception as e:
+            print(f"⚠ Error closing WebSocket: {e}")
+            logging.warning(f"Error closing WebSocket: {e}")
     
     return jsonify({'success': True, 'message': 'Logged out successfully'})
 
