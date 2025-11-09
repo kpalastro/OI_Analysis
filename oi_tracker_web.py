@@ -16,6 +16,7 @@ from functools import wraps
 from kite_trade import *
 from kiteconnect import KiteTicker
 import database as db
+from database import get_previous_close_price
 from dotenv import load_dotenv
 
 # ML System imports
@@ -184,6 +185,18 @@ previous_close_cache = {
     'NSE': {'date': None, 'price': None},
     'BSE': {'date': None, 'price': None}
 }
+
+# Previous close helper
+def get_cached_previous_close(exchange):
+    cache = previous_close_cache.setdefault(exchange, {'date': None, 'price': None})
+    today = date.today()
+
+    if cache['date'] != today or cache['price'] is None:
+        price = get_previous_close_price(exchange)
+        cache['price'] = price
+        cache['date'] = today
+
+    return cache['price']
 
 # ML System objects (initialized later)
 ml_predictor = None
