@@ -288,6 +288,31 @@
             animation: blink 1s infinite;
         }
 
+        .price-diff {
+            display: inline-block;
+            min-width: 60px;
+            padding: 2px 6px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            text-align: center;
+            border: 1px solid transparent;
+        }
+
+        .diff-positive {
+            background-color: rgba(22, 163, 74, 0.15);
+            color: #4ade80;
+        }
+
+        .diff-negative {
+            background-color: rgba(239, 68, 68, 0.15);
+            color: #fca5a5;
+        }
+
+        .diff-highlight {
+            border-color: rgba(250, 204, 21, 0.8);
+            box-shadow: 0 0 8px rgba(250, 204, 21, 0.4);
+        }
+
         @keyframes blink {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.7; }
@@ -853,6 +878,11 @@
                 document.getElementById(priceId).textContent = data.underlying_price.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
             }
 
+            if (data.vix != null) {
+                const vixId = exchange === 'NSE' ? 'vixNSE' : 'vixBSE';
+                document.getElementById(vixId).textContent = Number(data.vix).toFixed(2);
+            }
+
             const prevCloseEl = document.getElementById(`prevClose${suffix}`);
             const prevChangeEl = document.getElementById(`prevCloseChange${suffix}`);
             if (prevCloseEl) {
@@ -950,7 +980,12 @@
             }
             
             if (data.call_options && data.put_options) {
-                updateOptionChain(data.call_options, data.put_options, exchange);
+                updateOptionChain(
+                    data.call_options,
+                    data.put_options,
+                    exchange,
+                    data.diff_thresholds || { positive: 3.0, negative: 2.0 }
+                );
             }
             
             if (data.open_positions !== undefined) {
@@ -958,7 +993,7 @@
             }
         }
 
-        function updateOptionChain(callOptions, putOptions, exchange) {
+        function updateOptionChain(callOptions, putOptions, exchange, diffThresholds) {
             const containerId = `optionChain${exchange}`;
             const container = document.getElementById(containerId);
             
@@ -974,12 +1009,20 @@
                 html += `<th>OI %Chg<br>(${interval}m)</th>`;
             });
             html += '<th>OI</th>';
+            html += '<th>Vol</th>';
             html += '<th>Price</th>';
+            html += '<th>IV%</th>';
+            html += '<th>Theo</th>';
+            html += '<th>Δ vs Theo</th>';
             html += '<th>MNY</th>';
             html += '<th class="strike-column">STRIKE</th>';
             html += '<th>MNY</th>';
             html += '<th>Price</th>';
+            html += '<th>IV%</th>';
+            html += '<th>Theo</th>';
+            html += '<th>Δ vs Theo</th>';
             html += '<th>OI</th>';
+            html += '<th>Vol</th>';
             intervals.forEach(interval => {
                 html += `<th>OI %Chg<br>(${interval}m)</th>`;
             });
@@ -1011,6 +1054,7 @@
                 });
                 
                 html += `<td>${callOpt.latest_oi != null ? formatNumber(callOpt.latest_oi) : 'N/A'}</td>`;
+                html += `<td>${callOpt.volume != null ? formatNumber(callOpt.volume) : 'N/A'}</td>`;
                 
                 const callPrice = callOpt.ltp != null ? callOpt.ltp.toFixed(1) : 'N/A';
                 if (callPrice !== 'N/A') {
@@ -1018,6 +1062,15 @@
                 } else {
                     html += `<td>${callPrice}</td>`;
                 }
+
+                const callIv = callOpt.iv != null ? Number(callOpt.iv).toFixed(2) : '--';
+                html += `<td>${callIv}</td>`;
+
+                const callTheo = callOpt.theoretical_price != null ? callOpt.theoretical_price.toFixed(2) : '--';
+                html += `<td>${callTheo}</td>`;
+
+                const callDiff = callOpt.price_diff != null ? callOpt.price_diff : null;
+                html += `<td>${formatPriceDiff(callDiff, diffThresholds)}</td>`;
                 html += `<td><span class="mny-badge mny-${callMnyClass || 'atm'}">${callMny || '--'}</span></td>`;
                 
                 const strikeClass = `strike-${callMnyClass || 'atm'}`;
@@ -1034,8 +1087,18 @@
                 } else {
                     html += `<td>${putPrice}</td>`;
                 }
+
+                const putIv = putOpt.iv != null ? Number(putOpt.iv).toFixed(2) : '--';
+                html += `<td>${putIv}</td>`;
+
+                const putTheo = putOpt.theoretical_price != null ? putOpt.theoretical_price.toFixed(2) : '--';
+                html += `<td>${putTheo}</td>`;
+
+                const putDiff = putOpt.price_diff != null ? putOpt.price_diff : null;
+                html += `<td>${formatPriceDiff(putDiff, diffThresholds)}</td>`;
                 
                 html += `<td>${putOpt.latest_oi != null ? formatNumber(putOpt.latest_oi) : 'N/A'}</td>`;
+                html += `<td>${putOpt.volume != null ? formatNumber(putOpt.volume) : 'N/A'}</td>`;
                 
                 intervals.forEach(interval => {
                     const pctChange = putOpt.pct_changes ? putOpt.pct_changes[`${interval}m`] : null;
@@ -1095,6 +1158,17 @@
 
         function formatNumber(num) {
             return num.toLocaleString('en-IN');
+        }
+
+        function formatPriceDiff(diff, thresholds) {
+            if (diff === null || diff === undefined) {
+                return '--';
+            }
+            const diffValue = Number(diff);
+            const className = diffValue >= 0 ? 'diff-positive' : 'diff-negative';
+            const highlight = Math.abs(diffValue) >= (diffValue >= 0 ? thresholds.positive : thresholds.negative) ? ' diff-highlight' : '';
+            const prefix = diffValue > 0 ? '+' : '';
+            return `<span class="price-diff ${className}${highlight}">${prefix}${diffValue.toFixed(2)}</span>`;
         }
 
         let currentOrderData = {};

@@ -1144,6 +1144,8 @@ def run_data_update_loop_exchange(exchange):
     while True:
         try:
             logging.info(f"{exchange}: Starting data update iteration")
+
+            current_iteration_time = datetime.now()
             
             # Get current ATM strike
             current_atm_strike = get_atm_strike(
@@ -1183,6 +1185,22 @@ def run_data_update_loop_exchange(exchange):
             # Dynamic token subscription (subscribe/unsubscribe based on ATM changes)
             if option_tokens:
                 update_subscribed_tokens(option_tokens, exchange)
+
+            # Get underlying LTP
+            underlying_ltp = None
+            if underlying_token in latest_tick_data[exchange]:
+                underlying_ltp = latest_tick_data[exchange][underlying_token].get('last_price')
+
+            # Estimate time to expiry in years for Black-Scholes
+            time_to_expiry_years = None
+            if expiry_date:
+                expiry_datetime = datetime.combine(
+                    expiry_date,
+                    datetime.strptime('15:30:00', '%H:%M:%S').time()
+                )
+                time_to_expiry_seconds = (expiry_datetime - current_iteration_time).total_seconds()
+                if time_to_expiry_seconds > 0:
+                    time_to_expiry_years = time_to_expiry_seconds / (365 * 24 * 60 * 60)
             
             # Get OI data (WebSocket history + API fallback + Database on restart)
             raw_historical_oi_data = get_oi_data_hybrid(kite, option_contract_details, exchange)
@@ -1207,11 +1225,6 @@ def run_data_update_loop_exchange(exchange):
             vix_value=latest_vix_data['value'],
             current_time=current_iteration_time
             )
-            
-            # Get underlying LTP
-            underlying_ltp = None
-            if underlying_token in latest_tick_data[exchange]:
-                underlying_ltp = latest_tick_data[exchange][underlying_token].get('last_price')
             
             # Calculate Put Call Ratio (PCR) = Sum of PUT OI / Sum of CALL OI
             total_put_oi = sum(opt['latest_oi'] for opt in put_options if opt['latest_oi'] is not None)
