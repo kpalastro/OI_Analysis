@@ -10,7 +10,7 @@ import math
 import signal
 import atexit
 import os
-from datetime import datetime, date, timedelta, timezone
+from datetime import datetime, date, timedelta, timezone, time as dt_time
 from threading import Thread, Lock, Event
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -95,6 +95,7 @@ OI_CHANGE_INTERVALS_MIN = (3, 5, 10, 15, 30)
 
 # --- Financial Assumptions ---
 RISK_FREE_RATE = 0.08  # 8% annual interest rate
+MIN_TIME_TO_EXPIRY_SECONDS = 60 * 15  # Floor for time to expiry in seconds (15 minutes)
 
 # --- Price Diff Highlight Thresholds ---
 DEFAULT_DIFF_POS_THRESHOLD = 3.0
@@ -139,6 +140,10 @@ AUTO_SHUTDOWN_ENABLED = True
 AUTO_SHUTDOWN_IST_HOUR = 15
 AUTO_SHUTDOWN_IST_MINUTE = 30
 AUTO_SHUTDOWN_CHECK_INTERVAL_SECONDS = 30
+
+# --- Trading Session Window (IST) ---
+TRADING_START_IST = dt_time(9, 15)
+TRADING_END_IST = dt_time(15, 30)
 
 # ==============================================================================
 # --- GLOBAL VARIABLES ---
@@ -1141,9 +1146,33 @@ def run_data_update_loop_exchange(exchange):
     db_save_counter = 0
 
     logging.info(f"{exchange}: Data update thread started")
+    market_session_state = None
     
     while True:
         try:
+            now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+            session_state = 'OPEN'
+            if now_ist.time() < TRADING_START_IST:
+                session_state = 'PRE_OPEN'
+            elif now_ist.time() > TRADING_END_IST:
+                session_state = 'CLOSED'
+
+            if session_state != market_session_state:
+                logging.info(f"{exchange}: Market session state -> {session_state}")
+                market_session_state = session_state
+
+            if session_state != 'OPEN':
+                status_message = (
+                    'Pre-open (market opens 09:15 IST)'
+                    if session_state == 'PRE_OPEN'
+                    else 'Market closed (trading resumes 09:15 IST)'
+                )
+                with data_lock:
+                    latest_oi_data[exchange]['status'] = status_message
+                    latest_oi_data[exchange]['last_update'] = now_ist.strftime('%H:%M:%S')
+                time.sleep(UI_REFRESH_INTERVAL_SECONDS)
+                continue
+
             logging.info(f"{exchange}: Starting data update iteration")
 
             current_iteration_time = datetime.now()
@@ -1200,7 +1229,12 @@ def run_data_update_loop_exchange(exchange):
                     datetime.strptime('15:30:00', '%H:%M:%S').time()
                 )
                 time_to_expiry_seconds = (expiry_datetime - current_iteration_time).total_seconds()
-                if time_to_expiry_seconds > 0:
+                if time_to_expiry_seconds <= 0:
+                    if expiry_date >= current_iteration_time.date():
+                        time_to_expiry_seconds = MIN_TIME_TO_EXPIRY_SECONDS
+                    else:
+                        time_to_expiry_seconds = None
+                if time_to_expiry_seconds and time_to_expiry_seconds > 0:
                     time_to_expiry_years = time_to_expiry_seconds / (365 * 24 * 60 * 60)
             
             # Get OI data (WebSocket history + API fallback + Database on restart)

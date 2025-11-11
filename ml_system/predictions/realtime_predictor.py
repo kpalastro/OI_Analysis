@@ -122,10 +122,21 @@ class RealTimePredictor:
                 if name in self.scalers:
                     X_scaled = self.scalers[name].transform(X)
                 else:
-                    X_scaled = X.values
+                    X_scaled = X
+                
+                if hasattr(model, "feature_names_in_"):
+                    if isinstance(X_scaled, np.ndarray):
+                        X_input = pd.DataFrame(X_scaled, columns=self.feature_names, index=X.index)
+                    else:
+                        X_input = X_scaled[self.feature_names]
+                else:
+                    if isinstance(X_scaled, pd.DataFrame):
+                        X_input = X_scaled.values
+                    else:
+                        X_input = X_scaled
                 
                 # Predict
-                pred = model.predict(X_scaled)
+                pred = model.predict(X_input)
                 if isinstance(pred, np.ndarray) and pred.ndim > 1:
                     pred = pred.flatten()
                 

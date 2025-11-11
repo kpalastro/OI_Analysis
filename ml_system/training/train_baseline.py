@@ -9,6 +9,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pandas as pd
 import numpy as np
+import glob
 from sklearn.model_selection import train_test_split, TimeSeriesSplit
 from sklearn.linear_model import LinearRegression, Ridge, Lasso
 from sklearn.ensemble import RandomForestRegressor, RandomForestClassifier
@@ -406,6 +407,53 @@ class BaselineTrainer:
         feature_path = os.path.join(output_dir, "feature_names.pkl")
         joblib.dump(self.feature_names, feature_path)
         logger.info(f"Saved feature names: {feature_path}")
+    
+    def load_models(self, model_dir: str = "ml_system/models") -> bool:
+        """
+        Load previously saved models and scalers.
+        
+        Args:
+            model_dir: Directory containing saved model files
+        
+        Returns:
+            True if at least one model was loaded, otherwise False.
+        """
+        if not os.path.isdir(model_dir):
+            logger.warning(f"Model directory does not exist: {model_dir}")
+            return False
+        
+        loaded_any = False
+        model_paths = glob.glob(os.path.join(model_dir, "*_model.pkl"))
+        
+        for model_path in model_paths:
+            name = os.path.basename(model_path).replace("_model.pkl", "")
+            try:
+                self.models[name] = joblib.load(model_path)
+                loaded_any = True
+                logger.info(f"Loaded model: {model_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load model {model_path}: {e}")
+        
+        scaler_paths = glob.glob(os.path.join(model_dir, "*_scaler.pkl"))
+        for scaler_path in scaler_paths:
+            name = os.path.basename(scaler_path).replace("_scaler.pkl", "")
+            try:
+                self.scalers[name] = joblib.load(scaler_path)
+                logger.info(f"Loaded scaler: {scaler_path}")
+            except Exception as e:
+                logger.warning(f"Failed to load scaler {scaler_path}: {e}")
+        
+        feature_path = os.path.join(model_dir, "feature_names.pkl")
+        if os.path.exists(feature_path):
+            try:
+                self.feature_names = joblib.load(feature_path)
+                logger.info(f"Loaded feature names ({len(self.feature_names)} features)")
+            except Exception as e:
+                logger.warning(f"Failed to load feature names: {e}")
+        
+        if not loaded_any:
+            logger.info("No pretrained models found to load.")
+        return loaded_any
     
     def get_best_model(self, metric: str = 'test_r2') -> Tuple[str, Dict]:
         """
