@@ -125,6 +125,7 @@ PCT_CHANGE_THRESHOLDS = {
 }
 
 HEATMAP_VALUE_LABELS = {
+    'pct_change_3m': 'OI % change (3 min)',
     'pct_change_5m': 'OI % change (5 min)',
     'pct_change_10m': 'OI % change (10 min)',
     'pct_change_15m': 'OI % change (15 min)',
