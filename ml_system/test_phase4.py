@@ -11,6 +11,7 @@ current_dir = os.path.dirname(os.path.abspath(__file__))
 parent_dir = os.path.dirname(current_dir)
 sys.path.insert(0, parent_dir)
 
+import pandas as pd
 from ml_system.data.data_extractor import DataExtractor
 from ml_system.features.feature_engineer import FeatureEngineer
 from ml_system.training.train_baseline import BaselineTrainer
@@ -51,7 +52,8 @@ def test_phase4():
         try:
             # Try to load existing models first
             predictor.load_models()
-            if not predictor.is_loaded:
+            trainer_models_loaded = trainer.load_models()
+            if not predictor.is_loaded or not trainer_models_loaded:
                 print("   No existing models found. Training new models...")
                 features_df_filtered = features_df.loc[~(features_df.isna().any(axis=1) | features_df['price_change_pct'].isna())]
                 baseline_results = trainer.train_all_baselines(
@@ -61,6 +63,7 @@ def test_phase4():
                 )
                 trainer.save_models()
                 predictor.load_models()
+                trainer.load_models()
             else:
                 print("✅ Loaded existing models")
         except Exception as e:
@@ -74,6 +77,7 @@ def test_phase4():
             )
             trainer.save_models()
             predictor.load_models()
+            trainer.load_models()
         
         # Step 3: Backtesting
         print("\n[Step 3] Running backtest...")
@@ -101,6 +105,9 @@ def test_phase4():
             )
             
             # Use Random Forest for predictions (usually best)
+            if not trainer.models:
+                raise ValueError("No trained models available. Please ensure training completed successfully.")
+            
             if 'random_forest' in trainer.models:
                 predictions = trainer.models['random_forest'].predict(X_test)
             else:

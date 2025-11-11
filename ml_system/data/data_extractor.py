@@ -5,7 +5,6 @@ Extracts historical data from the database and prepares it for feature engineeri
 
 import sqlite3
 import pandas as pd
-import numpy as np
 from datetime import datetime, timedelta, date
 from typing import Dict, List, Tuple, Optional
 import logging

@@ -39,6 +39,7 @@ def initialize_database():
                 token INTEGER NOT NULL,
                 underlying_price REAL,
                 moneyness TEXT,
+                pct_change_3m REAL,
                 pct_change_5m REAL,
                 pct_change_10m REAL,
                 pct_change_15m REAL,
@@ -55,6 +56,7 @@ def initialize_database():
             new_columns = {
                 'underlying_price': 'REAL',
                 'moneyness': 'TEXT',
+                'pct_change_3m': 'REAL',
                 'pct_change_5m': 'REAL',
                 'pct_change_10m': 'REAL',
                 'pct_change_15m': 'REAL',
@@ -189,6 +191,7 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     moneyness = calculate_moneyness(strike, 'CE', underlying_price, atm_strike)
                     
                     # Extract percentage changes
+                    pct_3m = pct_changes.get('3m')
                     pct_5m = pct_changes.get('5m')
                     pct_10m = pct_changes.get('10m')
                     pct_15m = pct_changes.get('15m')
@@ -205,6 +208,7 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                         opt.get('token'),
                         underlying_price,
                         moneyness,
+                        pct_3m,
                         pct_5m,
                         pct_10m,
                         pct_15m,
@@ -221,6 +225,7 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                     moneyness = calculate_moneyness(strike, 'PE', underlying_price, atm_strike)
                     
                     # Extract percentage changes
+                    pct_3m = pct_changes.get('3m')
                     pct_5m = pct_changes.get('5m')
                     pct_10m = pct_changes.get('10m')
                     pct_15m = pct_changes.get('15m')
@@ -237,6 +242,7 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                         opt.get('token'),
                         underlying_price,
                         moneyness,
+                        pct_3m,
                         pct_5m,
                         pct_10m,
                         pct_15m,
@@ -248,9 +254,9 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
                 cursor.executemany('''
                     INSERT INTO option_chain_snapshots 
                     (timestamp, exchange, strike, option_type, symbol, oi, ltp, token,
-                     underlying_price, moneyness, pct_change_5m, pct_change_10m, 
+                     underlying_price, moneyness, pct_change_3m, pct_change_5m, pct_change_10m, 
                      pct_change_15m, pct_change_30m)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ''', records)
                 
                 # Update exchange metadata with underlying price
