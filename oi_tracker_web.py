@@ -2490,5 +2490,3 @@ if __name__ == '__main__':
         cleanup_connections()
         print("✓ Cleanup complete. Goodbye!")
         logging.info("Application shutdown complete")
-
-#######
