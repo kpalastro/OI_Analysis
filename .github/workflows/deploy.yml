@@ -131,6 +131,7 @@ jobs:
           HOST_IP: ${{ secrets.HOST_IP }}
           SSH_USER: ${{ secrets.SSH_USER }}
           DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          PM2_APP_NAME: ${{ secrets.PM2_APP_NAME }}
           REPO_URL: git@github.com:${{ github.repository }}.git
           # https://github.com/${{ github.repository }}.git
           TARGET_BRANCH: main
@@ -144,7 +145,7 @@ jobs:
             exit 1
           }
           
-          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP "REPO_URL=$REPO_URL DEPLOY_PATH=$DEPLOY_PATH TARGET_BRANCH=$TARGET_BRANCH bash -s" <<'ENDSSH'
+          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP "REPO_URL=$REPO_URL DEPLOY_PATH=$DEPLOY_PATH TARGET_BRANCH=$TARGET_BRANCH PM2_APP_NAME=$PM2_APP_NAME bash -s" <<'ENDSSH'
             set -e
             
             if [ -z "$REPO_URL" ] || [ -z "$DEPLOY_PATH" ]; then
@@ -157,38 +158,17 @@ jobs:
             REMOTE_USER="$(whoami)"
             echo "Remote user: $REMOTE_USER"
             
-            # Determine sudo usage
-            SUDO_CMD=""
-            if [ "$REMOTE_USER" != "root" ]; then
-              if command -v sudo >/dev/null 2>&1; then
-                if sudo -n true 2>/dev/null; then
-                  SUDO_CMD="sudo"
-                else
-                  echo "❌ Passwordless sudo is required for deployment."
-                  echo "Please configure the user '$REMOTE_USER' with passwordless sudo for systemctl and chown commands."
-                  echo "Example: create a sudoers file with:"
-                  echo "  $REMOTE_USER ALL=(ALL) NOPASSWD: /usr/bin/systemctl, /bin/chown"
-                  exit 1
-                fi
-              else
-                echo "⚠️  sudo not available; continuing without sudo."
-              fi
+            APP_NAME=\${PM2_APP_NAME:-oi-tracker}
+            
+            if ! command -v pm2 >/dev/null 2>&1; then
+              echo "❌ PM2 is not installed on the server. Install it with:"
+              echo "   npm install --global pm2"
+              exit 1
             fi
             
             # Ensure deployment directory exists
             mkdir -p "$DEPLOY_PATH"
 
-            # Fix permissions on deployment directory if needed
-            if [ -d "$DEPLOY_PATH" ]; then
-              if chown -R "$REMOTE_USER":"$REMOTE_USER" "$DEPLOY_PATH" 2>/dev/null; then
-                true
-              elif [ -n "$SUDO_CMD" ]; then
-                $SUDO_CMD chown -R "$REMOTE_USER":"$REMOTE_USER" "$DEPLOY_PATH"
-              else
-                echo "⚠️  Warning: Could not change ownership of $DEPLOY_PATH"
-              fi
-            fi
-            
             if [ ! -d "$DEPLOY_PATH/.git" ]; then
               echo "🔄 Repository not found at $DEPLOY_PATH. Cloning..."
               if [ -d "$DEPLOY_PATH" ] && [ "$(ls -A "$DEPLOY_PATH" 2>/dev/null)" ]; then
@@ -226,15 +206,14 @@ jobs:
               python3 database_migration.py || true
             fi
             
-            # Restart application service
-            echo "Restarting application..."
-            if [ -n "$SUDO_CMD" ]; then
-              $SUDO_CMD systemctl restart oi-tracker || true
-              $SUDO_CMD systemctl status oi-tracker --no-pager || true
+            # Restart application service using PM2
+            echo "Restarting application with PM2 (app name: $APP_NAME)..."
+            if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
+              pm2 reload "$APP_NAME"
             else
-              systemctl restart oi-tracker || true
-              systemctl status oi-tracker --no-pager || true
+              pm2 start "$DEPLOY_PATH/venv/bin/python" --name "$APP_NAME" -- "$DEPLOY_PATH/oi_tracker_web.py"
             fi
+            pm2 save || true
             
             echo "✅ Deployment completed successfully!"
           ENDSSH
@@ -243,37 +222,28 @@ jobs:
         env:
           HOST_IP: ${{ secrets.HOST_IP }}
           SSH_USER: ${{ secrets.SSH_USER }}
+          PM2_APP_NAME: ${{ secrets.PM2_APP_NAME }}
         run: |
           echo "Waiting for application to start..."
           sleep 10
-          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP 'REMOTE_USER=$(whoami);
-            SUDO_CMD="";
-            if [ "$REMOTE_USER" != "root" ] && command -v sudo >/dev/null 2>&1; then
-              if sudo -n true 2>/dev/null; then
-                SUDO_CMD="sudo";
-              else
-                echo "⚠️  Passwordless sudo not available; attempting without sudo";
-              fi;
+          ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP '
+            APP_NAME=${PM2_APP_NAME:-oi-tracker};
+            if ! command -v pm2 >/dev/null 2>&1; then
+              echo "❌ PM2 is not installed on the server.";
+              exit 1;
             fi;
-            if [ -n "$SUDO_CMD" ]; then
-              $SUDO_CMD systemctl is-active oi-tracker;
-            else
-              systemctl is-active oi-tracker;
-            fi' || {
-            echo "Service is not active. Checking logs..."
-            ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP 'REMOTE_USER=$(whoami);
-              SUDO_CMD="";
-              if [ "$REMOTE_USER" != "root" ] && command -v sudo >/dev/null 2>&1; then
-                if sudo -n true 2>/dev/null; then
-                  SUDO_CMD="sudo";
-                fi;
+            if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
+              STATUS=$(pm2 describe "$APP_NAME" | awk "/status/ {print \$4; exit}");
+              echo "PM2 status for $APP_NAME: $STATUS";
+              if [ "$STATUS" != "online" ]; then
+                echo "❌ Application is not online. Showing PM2 logs...";
+                pm2 logs "$APP_NAME" --lines 50 || true;
+                exit 1;
               fi;
-              if [ -n "$SUDO_CMD" ]; then
-                $SUDO_CMD journalctl -u oi-tracker -n 20 --no-pager;
-              else
-                journalctl -u oi-tracker -n 20 --no-pager;
-              fi' || true
-            exit 1
-          }
-          echo "Service is active. Deployment verified successfully!"
+            else
+              echo "❌ PM2 application '$APP_NAME' not found.";
+              pm2 ls || true;
+              exit 1;
+            fi'
+          echo "Service is active via PM2. Deployment verified successfully!"
 
