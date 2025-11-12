@@ -595,6 +595,14 @@
                             <div class="value" id="pcrNSE">--</div>
                         </div>
                         <div class="info-item">
+                            <div class="label">ITM CE Δ%</div>
+                            <div class="value" id="itmCeDeltaNSE">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">ITM PE Δ%</div>
+                            <div class="value" id="itmPeDeltaNSE">--</div>
+                        </div>
+                        <div class="info-item">
                             <div class="label">VIX</div>
                             <div class="value" id="vixNSE">--</div>
                         </div>
@@ -691,6 +699,14 @@
                         <div class="info-item">
                             <div class="label">PCR</div>
                             <div class="value" id="pcrBSE">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">ITM CE Δ%</div>
+                            <div class="value" id="itmCeDeltaBSE">--</div>
+                        </div>
+                        <div class="info-item">
+                            <div class="label">ITM PE Δ%</div>
+                            <div class="value" id="itmPeDeltaBSE">--</div>
                         </div>
                         <div class="info-item">
                             <div class="label">VIX</div>
@@ -909,6 +925,9 @@
             if (data.pcr != null) {
                 document.getElementById(`pcr${suffix}`).textContent = data.pcr;
             }
+            
+            setDeltaValue(`itmCeDelta${suffix}`, data.itm_ce_delta_pct);
+            setDeltaValue(`itmPeDelta${suffix}`, data.itm_pe_delta_pct);
             
             if (data.total_mtm != null) {
                 const mtmEl = document.getElementById(`mtm${suffix}`);
@@ -1169,6 +1188,19 @@
             const highlight = Math.abs(diffValue) >= (diffValue >= 0 ? thresholds.positive : thresholds.negative) ? ' diff-highlight' : '';
             const prefix = diffValue > 0 ? '+' : '';
             return `<span class="price-diff ${className}${highlight}">${prefix}${diffValue.toFixed(2)}</span>`;
+        }
+
+        function setDeltaValue(elementId, value) {
+            const el = document.getElementById(elementId);
+            if (!el) return;
+            if (value === null || value === undefined || Number.isNaN(Number(value))) {
+                el.textContent = '--';
+                el.style.color = 'var(--text-primary)';
+                return;
+            }
+            const num = Number(value);
+            el.textContent = `${num >= 0 ? '+' : ''}${num.toFixed(1)}%`;
+            el.style.color = num >= 0 ? '#38ef7d' : '#f45c43';
         }
 
         let currentOrderData = {};

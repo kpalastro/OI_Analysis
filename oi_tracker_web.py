@@ -145,6 +145,9 @@ AUTO_SHUTDOWN_CHECK_INTERVAL_SECONDS = 30
 TRADING_START_IST = dt_time(9, 15)
 TRADING_END_IST = dt_time(15, 30)
 
+# --- UI Aggregations ---
+ITM_DELTA_INTERVAL = '3m'
+
 # ==============================================================================
 # --- GLOBAL VARIABLES ---
 # ==============================================================================
@@ -183,6 +186,21 @@ def _build_shared_feed_payload(exchange: str, tick: dict, event_time: Optional[d
         "timestamp": event_time.isoformat() if event_time else None,
         "source": "oi_tracker_web"
     }
+
+
+def compute_itm_delta_percentage(options_list, interval_key: str = ITM_DELTA_INTERVAL):
+    """Return average percentage change for ITM options over the given interval."""
+    deltas = []
+    for option in options_list:
+        if option.get('moneyness') != 'ITM':
+            continue
+        pct_changes = option.get('pct_changes', {})
+        value = pct_changes.get(interval_key)
+        if value is not None:
+            deltas.append(value)
+    if not deltas:
+        return None
+    return sum(deltas) / len(deltas)
 
 def get_latest_tick_for_symbol(symbol_code: str):
     if not symbol_code:
@@ -280,6 +298,8 @@ latest_oi_data = {
         'last_update': None,
         'status': 'Initializing...',
         'pcr': None,
+        'itm_ce_delta_pct': None,
+        'itm_pe_delta_pct': None,
         'exchange': 'NSE',
         'underlying_name': 'NIFTY',
         'strike_difference': 50,
@@ -301,6 +321,8 @@ latest_oi_data = {
         'last_update': None,
         'status': 'Initializing...',
         'pcr': None,
+        'itm_ce_delta_pct': None,
+        'itm_pe_delta_pct': None,
         'exchange': 'BSE',
         'underlying_name': 'SENSEX',
         'strike_difference': 100,
@@ -1260,6 +1282,9 @@ def run_data_update_loop_exchange(exchange):
             vix_value=latest_vix_data['value'],
             current_time=current_iteration_time
             )
+
+            itm_ce_delta_pct = compute_itm_delta_percentage(call_options)
+            itm_pe_delta_pct = compute_itm_delta_percentage(put_options)
             
             # Calculate Put Call Ratio (PCR) = Sum of PUT OI / Sum of CALL OI
             total_put_oi = sum(opt['latest_oi'] for opt in put_options if opt['latest_oi'] is not None)
@@ -1338,6 +1363,8 @@ def run_data_update_loop_exchange(exchange):
                 latest_oi_data[exchange]['previous_close_change_pct'] = round(float(price_change_pct), 2) if price_change_pct is not None else None
                 latest_oi_data[exchange]['vix'] = latest_vix_data['value']
                 latest_oi_data[exchange]['diff_thresholds'] = DIFF_THRESHOLDS
+                latest_oi_data[exchange]['itm_ce_delta_pct'] = round(float(itm_ce_delta_pct), 1) if itm_ce_delta_pct is not None else None
+                latest_oi_data[exchange]['itm_pe_delta_pct'] = round(float(itm_pe_delta_pct), 1) if itm_pe_delta_pct is not None else None
                 if ml_prediction_data:
                     latest_oi_data[exchange]['ml_prediction'] = ml_prediction_data['prediction']
                     latest_oi_data[exchange]['ml_prediction_pct'] = ml_prediction_data['prediction_pct']
