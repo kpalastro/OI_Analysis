@@ -227,7 +227,7 @@ jobs:
           echo "Waiting for application to start..."
           sleep 10
           ssh -o StrictHostKeyChecking=no $SSH_USER@$HOST_IP '
-            APP_NAME=${PM2_APP_NAME:-oi-tracker};
+            APP_NAME=$PM2_APP_NAME;
             if ! command -v pm2 >/dev/null 2>&1; then
               echo "❌ PM2 is not installed on the server.";
               exit 1;
