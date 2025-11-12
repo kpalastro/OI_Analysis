@@ -235,6 +235,7 @@ jobs:
             if pm2 describe "$APP_NAME" >/dev/null 2>&1; then
               STATUS=$(pm2 describe "$APP_NAME" | awk "/status/ {print \$4; exit}");
               echo "PM2 status for $APP_NAME: $STATUS";
+              sleep 10;
               if [ "$STATUS" != "online" ]; then
                 echo "❌ Application is not online. Showing PM2 logs...";
                 pm2 logs "$APP_NAME" --lines 50 || true;

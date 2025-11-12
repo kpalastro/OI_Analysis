@@ -179,7 +179,7 @@ def _build_shared_feed_payload(exchange: str, tick: dict, event_time: Optional[d
         "symbol": symbol_code,
         "last_price": tick.get('last_price'),
         "oi": tick.get('oi'),
-        "volume": tick.get('volume'),
+        "volume": tick.get('volume.traded'),
         "timestamp": event_time.isoformat() if event_time else None,
         "source": "oi_tracker_web"
     }
