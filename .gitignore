@@ -42,6 +42,8 @@ ml_system/models/*.h5
 ml_system/models/*.keras
 ml_system/training/reports/*.png
 ml_system/training/reports/*.csv
+ml_system/data/feature_sets/
+ml_system/data/feature_store.db
 
 # Deployment
 deploy/.env
