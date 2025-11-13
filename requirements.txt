@@ -7,4 +7,5 @@ plotly==5.18.0
 kiteconnect
 python-dotenv
 joblib
+psycopg[binary]>=3.1.10
 

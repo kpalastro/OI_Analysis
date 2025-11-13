@@ -262,7 +262,10 @@ Tracks latest heartbeat per exchange to support restart recovery and analytics.
 | `ALPHA_CONFIDENCE_THRESHOLD` | Minimum probability to place Alpha trade. | 0.6 |
 | `ALPHA_POSITION_QTY` | Quantity for Alpha paper trades. | 50 |
 | `ALPHA_MIN_OPTION_PRICE` | Skip options cheaper than this. | 5.0 |
-| `OI_TRACKER_DB_PATH` | Custom DB location for analysis pipeline. | `oi_tracker.db` |
+| `DB_HOST`, `DB_PORT` | PostgreSQL host/port (enables Postgres backend when set). | `127.0.0.1`, `5432` |
+| `DB_DATABASE` | PostgreSQL database name. | `oi_tracker` |
+| `DB_USER`, `DB_PASSWORD` | Credentials for PostgreSQL connection. | – |
+| `OI_TRACKER_DB_PATH` | Custom SQLite path (used when Postgres env vars are absent). | `oi_tracker.db` |
 | `FLASK_SECRET_KEY` | Flask session signing. | `your-secret-key…` |
 
 Additional pipeline options (`FEATURE_EXCHANGE`, etc.) are documented in pipeline & training READMEs.
