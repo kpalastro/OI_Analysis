@@ -63,6 +63,17 @@ def _get_env_float(var_name: str, default: float) -> float:
     except (TypeError, ValueError):
         return default
 
+
+def _get_env_int(var_name: str, default: int) -> int:
+    """Safely parse an environment variable as int with a fallback."""
+    value = os.getenv(var_name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return default
+
 # ==============================================================================
 # --- CONFIGURATION ---
 # ==============================================================================
@@ -156,6 +167,10 @@ TRADING_END_IST = dt_time(15, 30)
 
 # --- UI Aggregations ---
 ITM_DELTA_INTERVAL = '3m'
+
+ALPHA_CONFIDENCE_THRESHOLD = _get_env_float('ALPHA_CONFIDENCE_THRESHOLD', 0.6)
+ALPHA_POSITION_QTY = _get_env_int('ALPHA_POSITION_QTY', 50)
+ALPHA_MIN_PRICE = _get_env_float('ALPHA_MIN_OPTION_PRICE', 5.0)
 
 # ==============================================================================
 # --- GLOBAL VARIABLES ---
@@ -436,6 +451,11 @@ total_mtm = {
 closed_positions_pnl = {
     'NSE': 0.0,
     'BSE': 0.0
+}
+
+alpha_strategy_state = {
+    'NSE': {'signal': None, 'position_id': None, 'symbol': None, 'side': None},
+    'BSE': {'signal': None, 'position_id': None, 'symbol': None, 'side': None},
 }
 
 # Flask app
@@ -1255,6 +1275,148 @@ def close_position(pos_id, position, exit_reason, exit_price, realized_pnl, exch
         'closed_pnl': closed_positions_pnl[exchange]
     })
 
+
+def _select_atm_option(options_list: List[dict]) -> Optional[dict]:
+    """Return the ATM option (or best available) from the provided list."""
+    if not options_list:
+        return None
+    for opt in options_list:
+        if str(opt.get('moneyness', '')).upper() == 'ATM':
+            return opt
+    for opt in options_list:
+        if opt.get('ltp') is not None:
+            return opt
+    return options_list[0] if options_list else None
+
+
+def _find_option_price(symbol: Optional[str], call_options: List[dict], put_options: List[dict]) -> Optional[float]:
+    if not symbol:
+        return None
+    for opt in call_options:
+        if opt.get('symbol') == symbol:
+            return opt.get('ltp')
+    for opt in put_options:
+        if opt.get('symbol') == symbol:
+            return opt.get('ltp')
+    return None
+
+
+def close_alpha_position(exchange: str, reason: str, exit_price: float) -> None:
+    """Close the currently open alpha strategy position, if any."""
+    state = alpha_strategy_state[exchange]
+    position_id = state.get('position_id')
+    if not position_id:
+        state['signal'] = 'Neutral'
+        return
+
+    with data_lock:
+        position = open_positions[exchange].get(position_id)
+
+    if not position:
+        state.update({'signal': 'Neutral', 'position_id': None, 'symbol': None, 'side': None})
+        return
+
+    entry_price = position['entry_price']
+    qty = position['qty']
+    side = position['side']
+    if side == 'B':
+        realized_pnl = (exit_price - entry_price) * qty
+    else:
+        realized_pnl = (entry_price - exit_price) * qty
+
+    close_position(position_id, position, reason, exit_price, realized_pnl, exchange)
+    state.update({'signal': 'Neutral', 'position_id': None, 'symbol': None, 'side': None})
+
+
+def execute_alpha_strategy(
+    exchange: str,
+    alpha_data: Optional[dict],
+    call_options: List[dict],
+    put_options: List[dict],
+) -> None:
+    """Open/close paper trades based on alpha model signal."""
+    if not alpha_model_ready:
+        return
+
+    state = alpha_strategy_state[exchange]
+    confidence = None
+    if alpha_data and alpha_data.get('confidence') is not None:
+        try:
+            confidence = float(alpha_data['confidence'])
+        except (TypeError, ValueError):
+            confidence = None
+    signal = alpha_data.get('signal') if alpha_data else None
+
+    target_signal = 'Neutral'
+    if signal and confidence is not None and confidence >= ALPHA_CONFIDENCE_THRESHOLD:
+        target_signal = signal
+
+    previous_signal = state.get('signal')
+
+    if target_signal == 'Neutral':
+        if state.get('position_id'):
+            current_price = _find_option_price(state.get('symbol'), call_options, put_options)
+            if current_price is not None:
+                close_alpha_position(exchange, "Alpha signal neutralized", current_price)
+        state['signal'] = 'Neutral'
+        return
+
+    # If signal is unchanged and we already hold a position, do nothing
+    if previous_signal == target_signal and state.get('position_id'):
+        return
+
+    # Close existing position if signal flips
+    if state.get('position_id'):
+        current_price = _find_option_price(state.get('symbol'), call_options, put_options)
+        if current_price is not None:
+            close_alpha_position(exchange, f"Alpha signal flip -> {target_signal}", current_price)
+        else:
+            logging.debug(f"{exchange}: Alpha strategy waiting for price to close existing position.")
+            return
+
+    option = _select_atm_option(call_options if target_signal == 'Bullish' else put_options)
+    if not option:
+        logging.debug(f"{exchange}: Alpha strategy could not locate suitable option for {target_signal}.")
+        return
+
+    symbol = option.get('symbol')
+    ltp = option.get('ltp')
+    option_type = 'CE' if target_signal == 'Bullish' else 'PE'
+
+    if symbol is None or ltp is None:
+        logging.debug(f"{exchange}: Alpha strategy missing symbol/LTP for {target_signal} option.")
+        return
+
+    if ltp < ALPHA_MIN_PRICE:
+        logging.debug(f"{exchange}: Alpha strategy skipped trade; {symbol} price {ltp:.2f} below minimum {ALPHA_MIN_PRICE}.")
+        return
+
+    position_id, position = register_paper_trade_position(
+        exchange,
+        symbol,
+        option_type,
+        'B',
+        float(ltp),
+        ALPHA_POSITION_QTY,
+        strategy="ALPHA"
+    )
+
+    state.update({
+        'signal': target_signal,
+        'position_id': position_id,
+        'symbol': symbol,
+        'side': position['side'],
+    })
+
+    if confidence is not None:
+        logging.info(
+            f"{exchange}: ✅ Alpha strategy opened {target_signal} position on {symbol} @ {ltp:.2f} (confidence {confidence:.2%})"
+        )
+    else:
+        logging.info(
+            f"{exchange}: ✅ Alpha strategy opened {target_signal} position on {symbol} @ {ltp:.2f}"
+        )
+
 # ==============================================================================
 # --- DYNAMIC TOKEN SUBSCRIPTION ---
 # ==============================================================================
@@ -1539,6 +1701,12 @@ def run_data_update_loop_exchange(exchange):
                 except Exception as e:
                     logging.warning(f"{exchange}: ML prediction error: {e}")
             
+            if alpha_model_ready:
+                try:
+                    execute_alpha_strategy(exchange, alpha_prediction_data, call_options, put_options)
+                except Exception as strategy_exc:
+                    logging.warning(f"{exchange}: Alpha strategy execution error: {strategy_exc}", exc_info=True)
+
             # Update global data
             with data_lock:
                 latest_oi_data[exchange]['call_options'] = call_options
@@ -2159,6 +2327,44 @@ def api_latest_price(symbol):
 
     return jsonify(payload)
 
+
+def register_paper_trade_position(
+    exchange: str,
+    symbol: str,
+    option_type: str,
+    side: str,
+    price: float,
+    qty: int,
+    strategy: str = "MANUAL"
+) -> tuple[str, dict]:
+    """Create and register a paper trade position entry."""
+    global position_counter, open_positions
+
+    position_counter[exchange] += 1
+    position_id = f"{exchange}_P{position_counter[exchange]:04d}"
+    entry_time = datetime.now().strftime('%H:%M:%S')
+    position = {
+        'id': position_id,
+        'symbol': symbol,
+        'type': option_type,
+        'side': side,
+        'entry_price': price,
+        'qty': qty,
+        'entry_time': entry_time,
+        'current_price': price,
+        'mtm': 0.0,
+        'exchange': exchange,
+        'strategy': strategy,
+    }
+    with data_lock:
+        open_positions[exchange][position_id] = position
+    side_text = "BUY" if side == 'B' else "SELL"
+    logging.info(
+        f"{exchange}: 📊 PAPER TRADE ({strategy}): {side_text} {qty} x {symbol} @ {price} | Position ID: {position_id}"
+    )
+    return position_id, position
+
+
 @app.route('/api/place_order', methods=['POST'])
 def place_order():
     """API endpoint to place a paper trading order (exchange-specific)."""
@@ -2176,35 +2382,19 @@ def place_order():
         if exchange not in ['NSE', 'BSE']:
             return jsonify({'success': False, 'error': 'Invalid exchange'}), 400
         
-        position_counter[exchange] += 1
-        position_id = f"{exchange}_P{position_counter[exchange]:04d}"
-        
-        entry_time = datetime.now().strftime('%H:%M:%S')
-        
-        # Create position
-        position = {
-            'id': position_id,
-            'symbol': symbol,
-            'type': option_type,
-            'side': side,
-            'entry_price': price,
-            'qty': qty,
-            'entry_time': entry_time,
-            'current_price': price,
-            'mtm': 0.0,
-            'exchange': exchange
-        }
-        
-        with data_lock:
-            open_positions[exchange][position_id] = position
-        
-        # Log to file
-        side_text = "BUY" if side == 'B' else "SELL"
-        logging.info(f"{exchange}: 📊 PAPER TRADE: {side_text} {qty} x {symbol} @ {price} | Position ID: {position_id}")
+        position_id, position = register_paper_trade_position(
+            exchange,
+            symbol,
+            option_type,
+            side,
+            price,
+            qty,
+            strategy="MANUAL"
+        )
         
         return jsonify({
             'success': True,
-            'message': f'{side_text} order placed',
+            'message': f'{"BUY" if side == "B" else "SELL"} order placed',
             'position_id': position_id,
             'position': position
         })
