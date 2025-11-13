@@ -108,6 +108,32 @@ def initialize_database():
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        # Table for alpha model predictions (for validation/analytics)
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS alpha_predictions (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TIMESTAMP NOT NULL,
+                exchange TEXT NOT NULL,
+                signal TEXT,
+                prediction_code INTEGER,
+                confidence REAL,
+                prob_bullish REAL,
+                prob_neutral REAL,
+                prob_bearish REAL,
+                underlying_price REAL,
+                atm_strike REAL,
+                selected_symbol TEXT,
+                action TEXT,
+                notes TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS idx_alpha_predictions_exchange_timestamp 
+            ON alpha_predictions(exchange, timestamp)
+        ''')
         
         conn.commit()
         conn.close()
@@ -274,6 +300,85 @@ def save_option_chain_snapshot(exchange, call_options, put_options, underlying_p
             conn.close()
         except Exception as e:
             logging.error(f"Error saving snapshot for {exchange}: {e}", exc_info=True)
+
+
+def save_alpha_prediction(
+    exchange,
+    signal,
+    prediction_code,
+    confidence,
+    prob_bullish=None,
+    prob_neutral=None,
+    prob_bearish=None,
+    underlying_price=None,
+    atm_strike=None,
+    selected_symbol=None,
+    action=None,
+    notes=None,
+    timestamp=None,
+):
+    """
+    Persist an alpha-model prediction for future validation.
+
+    Args:
+        exchange: 'NSE' or 'BSE'
+        signal: String label (Bullish/Neutral/Bearish)
+        prediction_code: Integer code (-1, 0, 1)
+        confidence: Highest probability value
+        prob_bullish/neutral/bearish: Individual class probabilities (0-1)
+        underlying_price: Optional underlying price used for prediction
+        atm_strike: Optional ATM strike at prediction time
+        selected_symbol: Option symbol selected by strategy (if any)
+        action: Optional action tag ('open', 'skip_low_price', etc.)
+        notes: Optional free-form text
+        timestamp: datetime of prediction (defaults to now)
+    """
+    if timestamp is None:
+        timestamp = datetime.now()
+
+    with db_lock:
+        try:
+            conn = get_db_connection()
+            cursor = conn.cursor()
+            cursor.execute(
+                '''
+                INSERT INTO alpha_predictions (
+                    timestamp,
+                    exchange,
+                    signal,
+                    prediction_code,
+                    confidence,
+                    prob_bullish,
+                    prob_neutral,
+                    prob_bearish,
+                    underlying_price,
+                    atm_strike,
+                    selected_symbol,
+                    action,
+                    notes
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ''',
+                (
+                    timestamp,
+                    exchange,
+                    signal,
+                    prediction_code,
+                    confidence,
+                    prob_bullish,
+                    prob_neutral,
+                    prob_bearish,
+                    underlying_price,
+                    atm_strike,
+                    selected_symbol,
+                    action,
+                    notes,
+                ),
+            )
+            conn.commit()
+            conn.close()
+        except Exception as exc:
+            logging.error(f"Error saving alpha prediction for {exchange}: {exc}", exc_info=True)
 
 def get_last_snapshot_time(exchange):
     """

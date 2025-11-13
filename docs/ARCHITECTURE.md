@@ -166,6 +166,7 @@ Tracks latest heartbeat per exchange to support restart recovery and analytics.
 - `get_previous_close_price(exchange)` fetches previous trading-day underlying close (used for UI deltas).
 - `cleanup_old_data(days)` removes stale rows (default 30 days).
 - `get_database_stats()` surfaces record counts, file size, metadata (useful for health dashboards).
+- `alpha_predictions`: newly added table capturing per-loop alpha model predictions and strategy decisions (signal, confidence, per-class probabilities, optional action metadata) for offline validation and performance tracking.
 
 ---
 

@@ -1333,6 +1333,8 @@ def execute_alpha_strategy(
     alpha_data: Optional[dict],
     call_options: List[dict],
     put_options: List[dict],
+    underlying_price: Optional[float],
+    atm_strike: Optional[float],
 ) -> None:
     """Open/close paper trades based on alpha model signal."""
     if not alpha_model_ready:
@@ -1389,6 +1391,20 @@ def execute_alpha_strategy(
 
     if ltp < ALPHA_MIN_PRICE:
         logging.debug(f"{exchange}: Alpha strategy skipped trade; {symbol} price {ltp:.2f} below minimum {ALPHA_MIN_PRICE}.")
+        db.save_alpha_prediction(
+            exchange=exchange,
+            signal=target_signal,
+            prediction_code=alpha_data.get('code') if alpha_data else None,
+            confidence=confidence,
+            prob_bullish=(alpha_data.get('probabilities', {}).get('Bullish') if alpha_data else None),
+            prob_neutral=(alpha_data.get('probabilities', {}).get('Neutral') if alpha_data else None),
+            prob_bearish=(alpha_data.get('probabilities', {}).get('Bearish') if alpha_data else None),
+            underlying_price=underlying_price,
+            atm_strike=atm_strike,
+            selected_symbol=symbol,
+            action='skip_low_price',
+            notes=f"Price {ltp:.2f} below min {ALPHA_MIN_PRICE}",
+        )
         return
 
     position_id, position = register_paper_trade_position(
@@ -1416,6 +1432,20 @@ def execute_alpha_strategy(
         logging.info(
             f"{exchange}: ✅ Alpha strategy opened {target_signal} position on {symbol} @ {ltp:.2f}"
         )
+
+    db.save_alpha_prediction(
+        exchange=exchange,
+        signal=target_signal,
+        prediction_code=alpha_data.get('code') if alpha_data else None,
+        confidence=confidence,
+        prob_bullish=(alpha_data.get('probabilities', {}).get('Bullish') if alpha_data else None),
+        prob_neutral=(alpha_data.get('probabilities', {}).get('Neutral') if alpha_data else None),
+        prob_bearish=(alpha_data.get('probabilities', {}).get('Bearish') if alpha_data else None),
+        underlying_price=underlying_price,
+        atm_strike=atm_strike,
+        selected_symbol=symbol,
+        action='open_position',
+    )
 
 # ==============================================================================
 # --- DYNAMIC TOKEN SUBSCRIPTION ---
@@ -1653,6 +1683,19 @@ def run_data_update_loop_exchange(exchange):
                             'confidence': float(np.max(probabilities)),
                             'probabilities': prob_map
                         }
+
+                        # Persist prediction for offline evaluation
+                        db.save_alpha_prediction(
+                            exchange=exchange,
+                            signal=alpha_prediction_data['signal'],
+                            prediction_code=alpha_prediction_data['code'],
+                            confidence=alpha_prediction_data['confidence'],
+                            prob_bullish=prob_map.get('Bullish'),
+                            prob_neutral=prob_map.get('Neutral'),
+                            prob_bearish=prob_map.get('Bearish'),
+                            underlying_price=float(underlying_ltp) if underlying_ltp is not None else None,
+                            atm_strike=float(current_atm_strike) if current_atm_strike is not None else None,
+                        )
                 except Exception as alpha_exc:
                     logging.debug(f"{exchange}: Alpha model prediction unavailable: {alpha_exc}")
 
@@ -1703,7 +1746,14 @@ def run_data_update_loop_exchange(exchange):
             
             if alpha_model_ready:
                 try:
-                    execute_alpha_strategy(exchange, alpha_prediction_data, call_options, put_options)
+                    execute_alpha_strategy(
+                        exchange,
+                        alpha_prediction_data,
+                        call_options,
+                        put_options,
+                        underlying_ltp,
+                        current_atm_strike,
+                    )
                 except Exception as strategy_exc:
                     logging.warning(f"{exchange}: Alpha strategy execution error: {strategy_exc}", exc_info=True)
 
