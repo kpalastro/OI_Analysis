@@ -436,6 +436,24 @@
             border: 1px solid var(--text-secondary);
         }
 
+        .ml-signal.Bullish {
+            background: rgba(72, 187, 120, 0.2);
+            color: var(--itm-color);
+            border: 1px solid var(--itm-color);
+        }
+
+        .ml-signal.Bearish {
+            background: rgba(245, 101, 101, 0.2);
+            color: var(--otm-color);
+            border: 1px solid var(--otm-color);
+        }
+
+        .ml-signal.Neutral {
+            background: rgba(237, 137, 54, 0.2);
+            color: #f6ad55;
+            border: 1px solid #f6ad55;
+        }
+
         .ml-reasoning {
             grid-column: 1 / -1;
             font-size: 0.75rem;
@@ -448,6 +466,40 @@
         .info-item.ml-prediction {
             border-left: 2px solid rgba(102, 126, 234, 0.5);
             padding-left: 12px;
+        }
+
+        .info-item.alpha-prediction {
+            border-left: 2px solid rgba(72, 187, 120, 0.4);
+            padding-left: 12px;
+        }
+
+        .alpha-signal {
+            font-weight: 700;
+        }
+
+        .alpha-signal.bullish {
+            color: #38ef7d;
+        }
+
+        .alpha-signal.bearish {
+            color: #f45c43;
+        }
+
+        .alpha-signal.neutral {
+            color: #f6ad55;
+        }
+
+        .alpha-probabilities {
+            grid-column: 1 / -1;
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+            font-size: 0.75rem;
+            color: var(--text-secondary);
+        }
+
+        .alpha-probabilities span {
+            display: block;
         }
 
         .type-badge {
@@ -602,6 +654,11 @@
                             <div class="label">ITM PE Δ%</div>
                             <div class="value" id="itmPeDeltaNSE">--</div>
                         </div>
+                        <div class="info-item alpha-prediction" id="alphaInfoNSE" style="display: none;">
+                            <div class="label">Alpha</div>
+                            <div class="value alpha-signal" id="alphaSignalNSE">--</div>
+                            <div class="subvalue" id="alphaConfidenceNSE">--</div>
+                        </div>
                         <div class="info-item">
                             <div class="label">VIX</div>
                             <div class="value" id="vixNSE">--</div>
@@ -648,6 +705,26 @@
                             <span class="ml-value" id="mlStrengthNSE">--</span>
                         </div>
                         <div class="ml-reasoning" id="mlReasoningNSE"></div>
+                    </div>
+                </div>
+
+                <!-- Alpha Model Card -->
+                <div class="ml-prediction-card" id="alphaCardNSE" style="display: none;">
+                    <div class="ml-card-header">
+                        <i class="bi bi-graph-up-arrow"></i> Alpha Model
+                    </div>
+                    <div class="ml-card-body">
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Signal:</span>
+                            <span class="ml-value ml-signal" id="alphaSignalTextNSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Confidence:</span>
+                            <span class="ml-value" id="alphaConfidenceTextNSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item alpha-probabilities" id="alphaProbabilitiesNSE">
+                            <span>--</span>
+                        </div>
                     </div>
                 </div>
                 
@@ -708,6 +785,11 @@
                             <div class="label">ITM PE Δ%</div>
                             <div class="value" id="itmPeDeltaBSE">--</div>
                         </div>
+                        <div class="info-item alpha-prediction" id="alphaInfoBSE" style="display: none;">
+                            <div class="label">Alpha</div>
+                            <div class="value alpha-signal" id="alphaSignalBSE">--</div>
+                            <div class="subvalue" id="alphaConfidenceBSE">--</div>
+                        </div>
                         <div class="info-item">
                             <div class="label">VIX</div>
                             <div class="value" id="vixBSE">--</div>
@@ -754,6 +836,26 @@
                             <span class="ml-value" id="mlStrengthBSE">--</span>
                         </div>
                         <div class="ml-reasoning" id="mlReasoningBSE"></div>
+                    </div>
+                </div>
+
+                <!-- Alpha Model Card -->
+                <div class="ml-prediction-card" id="alphaCardBSE" style="display: none;">
+                    <div class="ml-card-header">
+                        <i class="bi bi-graph-up-arrow"></i> Alpha Model
+                    </div>
+                    <div class="ml-card-body">
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Signal:</span>
+                            <span class="ml-value ml-signal" id="alphaSignalTextBSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item">
+                            <span class="ml-label">Confidence:</span>
+                            <span class="ml-value" id="alphaConfidenceTextBSE">--</span>
+                        </div>
+                        <div class="ml-prediction-item alpha-probabilities" id="alphaProbabilitiesBSE">
+                            <span>--</span>
+                        </div>
                     </div>
                 </div>
                 
@@ -945,6 +1047,79 @@
             
             if (data.last_update) {
                 document.getElementById(`lastUpdate${suffix}`).textContent = data.last_update;
+            }
+            
+            // Update Alpha Model Prediction
+            const alphaInfo = document.getElementById(`alphaInfo${suffix}`);
+            const alphaSignalEl = document.getElementById(`alphaSignal${suffix}`);
+            const alphaConfidenceEl = document.getElementById(`alphaConfidence${suffix}`);
+            const alphaCard = document.getElementById(`alphaCard${suffix}`);
+            const alphaSignalCardEl = document.getElementById(`alphaSignalText${suffix}`);
+            const alphaConfidenceCardEl = document.getElementById(`alphaConfidenceText${suffix}`);
+            const alphaProbEl = document.getElementById(`alphaProbabilities${suffix}`);
+
+            if (data.alpha_signal) {
+                if (alphaInfo) {
+                    alphaInfo.style.display = 'flex';
+                    if (alphaSignalEl) {
+                        const signalClass = data.alpha_signal.toLowerCase();
+                        alphaSignalEl.textContent = data.alpha_signal;
+                        alphaSignalEl.className = `value alpha-signal ${signalClass}`;
+                    }
+                    if (alphaConfidenceEl && data.alpha_confidence != null) {
+                        alphaConfidenceEl.textContent = `${(Number(data.alpha_confidence) * 100).toFixed(1)}%`;
+                        alphaConfidenceEl.className = 'subvalue';
+                    }
+                }
+                if (alphaCard) {
+                    alphaCard.style.display = 'block';
+                }
+                if (alphaSignalCardEl) {
+                    alphaSignalCardEl.textContent = data.alpha_signal;
+                    alphaSignalCardEl.className = `ml-value ml-signal ${data.alpha_signal}`;
+                }
+                if (alphaConfidenceCardEl && data.alpha_confidence != null) {
+                    alphaConfidenceCardEl.textContent = `${(Number(data.alpha_confidence) * 100).toFixed(1)}%`;
+                }
+                if (alphaProbEl) {
+                    if (data.alpha_probabilities) {
+                        const entries = Object.entries(data.alpha_probabilities);
+                        if (entries.length > 0) {
+                            alphaProbEl.innerHTML = entries
+                                .map(([label, prob]) => `<span>${label}: ${(Number(prob) * 100).toFixed(1)}%</span>`)
+                                .join('');
+                        } else {
+                            alphaProbEl.innerHTML = '<span>--</span>';
+                        }
+                    } else {
+                        alphaProbEl.innerHTML = '<span>--</span>';
+                    }
+                }
+            } else {
+                if (alphaInfo) {
+                    alphaInfo.style.display = 'none';
+                }
+                if (alphaCard) {
+                    alphaCard.style.display = 'none';
+                }
+                if (alphaSignalCardEl) {
+                    alphaSignalCardEl.textContent = '--';
+                    alphaSignalCardEl.className = 'ml-value ml-signal';
+                }
+                if (alphaConfidenceCardEl) {
+                    alphaConfidenceCardEl.textContent = '--';
+                }
+                if (alphaSignalEl) {
+                    alphaSignalEl.textContent = '--';
+                    alphaSignalEl.className = 'value alpha-signal';
+                }
+                if (alphaConfidenceEl) {
+                    alphaConfidenceEl.textContent = '--';
+                    alphaConfidenceEl.className = 'subvalue';
+                }
+                if (alphaProbEl) {
+                    alphaProbEl.innerHTML = '<span>--</span>';
+                }
             }
             
             // Update ML Prediction

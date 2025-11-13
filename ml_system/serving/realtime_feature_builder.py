@@ -186,6 +186,8 @@ class RealTimeFeatureBuilder:
         features["net_itm_pressure"] = features["call_itm_oi"] - features["put_itm_oi"]
         features["net_oi"] = features["call_oi_total"] - features["put_oi_total"]
 
+        features = features.replace([np.inf, -np.inf], np.nan).fillna(0.0)
+
         return features
 
     def _add_lagged_features(self, features: pd.DataFrame) -> pd.DataFrame:

@@ -12,7 +12,7 @@ import atexit
 import os
 from datetime import datetime, date, timedelta, timezone, time as dt_time
 from threading import Thread, Lock, Event
-from typing import Optional
+from typing import Optional, Dict, List, Tuple
 from zoneinfo import ZoneInfo
 from flask import Flask, render_template, jsonify, request, redirect, url_for, session
 from flask_socketio import SocketIO, emit
@@ -39,6 +39,15 @@ try:
 except ImportError as e:
     ML_SYSTEM_AVAILABLE = False
     logging.warning(f"ML System not available: {e}")
+
+# Alpha model serving imports
+try:
+    from ml_system.serving import RealTimeFeatureBuilder
+    from ml_system.serving.model_server import get_artifacts
+    ALPHA_MODEL_AVAILABLE = True
+except ImportError as e:
+    ALPHA_MODEL_AVAILABLE = False
+    logging.warning(f"Alpha model serving components not available: {e}")
 
 # Load environment variables from .env file
 load_dotenv()
@@ -248,6 +257,30 @@ latest_tick_metadata = {
     'BSE': {}
 }
 
+ALPHA_CLASS_LABELS = {-1: 'Bearish', 0: 'Neutral', 1: 'Bullish'}
+alpha_model_ready = False
+alpha_model_artifacts = None
+alpha_feature_builder: Optional["RealTimeFeatureBuilder"] = None
+alpha_required_history_minutes = 0
+
+if ALPHA_MODEL_AVAILABLE:
+    try:
+        alpha_model_artifacts = get_artifacts()
+        alpha_feature_builder = RealTimeFeatureBuilder(alpha_model_artifacts.feature_names)
+        alpha_model_ready = True
+        lag_minutes = getattr(alpha_feature_builder, "lag_minutes", (15,))
+        alpha_required_history_minutes = max(lag_minutes) + 5 if lag_minutes else 15
+        logging.info(
+            "Alpha model artifacts loaded successfully (features=%d, lag_minutes=%s)",
+            len(alpha_model_artifacts.feature_names),
+            lag_minutes,
+        )
+    except Exception as exc:
+        alpha_model_ready = False
+        logging.warning(f"Alpha model artifacts unavailable: {exc}")
+else:
+    logging.info("Alpha model serving components not available - skipping alpha predictions.")
+
 latest_vix_data = {
     'value': None,
     'timestamp': None
@@ -307,6 +340,10 @@ latest_oi_data = {
         'ml_signal': None,
         'ml_confidence': None,
         'ml_prediction_pct': None,
+        'alpha_signal': None,
+        'alpha_confidence': None,
+        'alpha_prediction_code': None,
+        'alpha_probabilities': None,
         'previous_close': None,
         'previous_close_change': None,
         'previous_close_change_pct': None,
@@ -330,6 +367,10 @@ latest_oi_data = {
         'ml_signal': None,
         'ml_confidence': None,
         'ml_prediction_pct': None,
+        'alpha_signal': None,
+        'alpha_confidence': None,
+        'alpha_prediction_code': None,
+        'alpha_probabilities': None,
         'previous_close': None,
         'previous_close_change': None,
         'previous_close_change_pct': None,
@@ -776,6 +817,117 @@ def compute_theoretical_price(option_type: str, spot: float, strike: float,
     if price is None:
         return None
     return round(price, 2)
+
+
+def infer_option_moneyness(option_type: str, position: Optional[int], strike: Optional[float],
+                           atm_strike: Optional[float]) -> str:
+    if position is not None:
+        if position == 0:
+            return 'ATM'
+        if option_type.upper() == 'CE':
+            return 'ITM' if position < 0 else 'OTM'
+        return 'ITM' if position > 0 else 'OTM'
+
+    if strike is not None and atm_strike is not None:
+        if strike == atm_strike:
+            return 'ATM'
+        if option_type.upper() == 'CE':
+            return 'ITM' if strike < atm_strike else 'OTM'
+        return 'ITM' if strike > atm_strike else 'OTM'
+
+    return 'ATM'
+
+
+def build_alpha_snapshot_dataframe(
+    raw_historical_data: Dict[str, List[dict]],
+    contract_details: Dict[str, dict],
+    atm_strike: Optional[float],
+    underlying_price: Optional[float],
+    current_time: datetime,
+    history_minutes: int
+) -> pd.DataFrame:
+    if not raw_historical_data:
+        return pd.DataFrame()
+
+    cutoff_time = None
+    if history_minutes and history_minutes > 0:
+        cutoff_time = current_time - timedelta(minutes=history_minutes)
+
+    rows = []
+
+    for option_key, candles in raw_historical_data.items():
+        details = contract_details.get(option_key, {})
+        strike = details.get('strike')
+        position = details.get('position')
+        option_type = 'CE' if option_key.endswith('_ce') else 'PE'
+        moneyness = infer_option_moneyness(option_type, position, strike, atm_strike)
+
+        for candle in candles:
+            ts = candle.get('date')
+            if ts is None:
+                continue
+
+            if isinstance(ts, pd.Timestamp):
+                ts_dt = ts.to_pydatetime()
+            elif isinstance(ts, datetime):
+                ts_dt = ts
+            else:
+                try:
+                    ts_dt = pd.to_datetime(ts).to_pydatetime()
+                except Exception:
+                    continue
+
+            if ts_dt.tzinfo is not None:
+                ts_dt = ts_dt.astimezone(timezone.utc).replace(tzinfo=None)
+
+            if cutoff_time and ts_dt < cutoff_time:
+                continue
+
+            oi_value = candle.get('oi')
+            if oi_value is None:
+                continue
+
+            row_underlying = (
+                candle.get('underlying_price')
+                or candle.get('underlying')
+                or underlying_price
+            )
+
+            rows.append(
+                {
+                    'timestamp': ts_dt,
+                    'oi': oi_value,
+                    'option_type': option_type,
+                    'moneyness': moneyness,
+                    'strike': strike,
+                    'underlying_price': row_underlying,
+                    'iv': candle.get('iv'),
+                }
+            )
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+
+    numeric_cols = ['oi', 'strike', 'underlying_price', 'iv']
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+
+    df['oi'] = df['oi'].fillna(0.0)
+
+    if 'strike' in df.columns:
+        df['strike'] = df['strike'].ffill().bfill()
+
+    if 'underlying_price' in df.columns:
+        if underlying_price is not None:
+            df['underlying_price'] = df['underlying_price'].fillna(underlying_price)
+        df['underlying_price'] = df['underlying_price'].ffill().bfill().fillna(underlying_price or 0.0)
+
+    if 'iv' in df.columns:
+        df['iv'] = df['iv'].fillna(0.0)
+
+    return df
 
 
 def calculate_oi_differences(raw_historical_data_store: dict, intervals_min: tuple):
@@ -1304,6 +1456,44 @@ def run_data_update_loop_exchange(exchange):
             
             # Generate ML prediction if available
             ml_prediction_data = None
+            alpha_prediction_data = None
+
+            if alpha_model_ready and alpha_feature_builder and underlying_ltp is not None:
+                try:
+                    snapshot_df = build_alpha_snapshot_dataframe(
+                        raw_historical_oi_data,
+                        option_contract_details,
+                        current_atm_strike,
+                        underlying_ltp,
+                        current_iteration_time,
+                        alpha_required_history_minutes or 20
+                    )
+
+                    if not snapshot_df.empty and alpha_model_artifacts:
+                        feature_vector, _ = alpha_feature_builder.build_feature_vector(snapshot_df)
+                        feature_vector_2d = feature_vector.reshape(1, -1)
+                        scaled_features = alpha_model_artifacts.scaler.transform(feature_vector_2d)
+                        probabilities = alpha_model_artifacts.model.predict_proba(scaled_features)[0]
+                        model_classes = getattr(
+                            alpha_model_artifacts.model,
+                            "classes_",
+                            sorted(ALPHA_CLASS_LABELS.keys())
+                        )
+                        prediction_code = int(alpha_model_artifacts.model.predict(scaled_features)[0])
+                        prob_map = {
+                            ALPHA_CLASS_LABELS.get(int(cls), str(cls)): float(prob)
+                            for cls, prob in zip(model_classes, probabilities)
+                        }
+
+                        alpha_prediction_data = {
+                            'signal': ALPHA_CLASS_LABELS.get(prediction_code, str(prediction_code)),
+                            'code': prediction_code,
+                            'confidence': float(np.max(probabilities)),
+                            'probabilities': prob_map
+                        }
+                except Exception as alpha_exc:
+                    logging.debug(f"{exchange}: Alpha model prediction unavailable: {alpha_exc}")
+
             if ml_models_loaded and ml_predictor and ml_feature_engineer and underlying_ltp:
                 try:
                     # Get recent data for feature engineering
@@ -1365,6 +1555,16 @@ def run_data_update_loop_exchange(exchange):
                 latest_oi_data[exchange]['diff_thresholds'] = DIFF_THRESHOLDS
                 latest_oi_data[exchange]['itm_ce_delta_pct'] = round(float(itm_ce_delta_pct), 1) if itm_ce_delta_pct is not None else None
                 latest_oi_data[exchange]['itm_pe_delta_pct'] = round(float(itm_pe_delta_pct), 1) if itm_pe_delta_pct is not None else None
+                if alpha_prediction_data:
+                    latest_oi_data[exchange]['alpha_signal'] = alpha_prediction_data['signal']
+                    latest_oi_data[exchange]['alpha_confidence'] = alpha_prediction_data['confidence']
+                    latest_oi_data[exchange]['alpha_prediction_code'] = alpha_prediction_data['code']
+                    latest_oi_data[exchange]['alpha_probabilities'] = alpha_prediction_data['probabilities']
+                else:
+                    latest_oi_data[exchange]['alpha_signal'] = None
+                    latest_oi_data[exchange]['alpha_confidence'] = None
+                    latest_oi_data[exchange]['alpha_prediction_code'] = None
+                    latest_oi_data[exchange]['alpha_probabilities'] = None
                 if ml_prediction_data:
                     latest_oi_data[exchange]['ml_prediction'] = ml_prediction_data['prediction']
                     latest_oi_data[exchange]['ml_prediction_pct'] = ml_prediction_data['prediction_pct']
