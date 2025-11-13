@@ -18,11 +18,16 @@ from flask import Flask, render_template, jsonify, request, redirect, url_for, s
 from flask_socketio import SocketIO, emit
 from functools import wraps
 from urllib.parse import unquote
+
+# Load environment variables BEFORE importing database module
+# This ensures PostgreSQL config is available when database.py initializes
+from dotenv import load_dotenv
+load_dotenv()
+
 from kite_trade import *
 from kiteconnect import KiteTicker
 import database as db
 from database import get_previous_close_price
-from dotenv import load_dotenv
 try:
     from analysis import OIBackAnalysisPipeline
 except ImportError:
@@ -48,9 +53,6 @@ try:
 except ImportError as e:
     ALPHA_MODEL_AVAILABLE = False
     logging.warning(f"Alpha model serving components not available: {e}")
-
-# Load environment variables from .env file
-load_dotenv()
 
 
 def _get_env_float(var_name: str, default: float) -> float:
