@@ -242,7 +242,70 @@ def run_pipeline(exchange: str = "NSE") -> Path:
 
 
 if __name__ == "__main__":
-    exchange = os.environ.get("FEATURE_EXCHANGE", "NSE")
-    path = run_pipeline(exchange)
-    print(f"Saved feature set for {exchange} -> {path}")
+    import argparse
+    
+    parser = argparse.ArgumentParser(
+        description="Generate feature sets from option chain snapshots"
+    )
+    parser.add_argument(
+        "--exchange",
+        choices=["NSE", "BSE"],
+        default="NSE",
+        help="Exchange to process (default: NSE)"
+    )
+    parser.add_argument(
+        "--lookback-days",
+        type=int,
+        default=30,
+        help="Number of days to look back (default: 30)"
+    )
+    parser.add_argument(
+        "--target-minutes",
+        type=int,
+        default=15,
+        help="Forward-looking target window in minutes (default: 15)"
+    )
+    parser.add_argument(
+        "--output-format",
+        choices=["csv", "sqlite", "both"],
+        default="both",
+        help="Output format (default: both)"
+    )
+    parser.add_argument(
+        "--db-path",
+        type=str,
+        default="oi_tracker.db",
+        help="Path to source SQLite database (default: oi_tracker.db)"
+    )
+    
+    args = parser.parse_args()
+    
+    config = FeaturePipelineConfig(
+        db_path=args.db_path,
+        lookback_days=args.lookback_days,
+        target_minutes=args.target_minutes
+    )
+    
+    pipeline = FeaturePipeline(config)
+    
+    try:
+        print(f"Building feature set for {args.exchange}...")
+        print(f"  Lookback: {args.lookback_days} days")
+        print(f"  Target: {args.target_minutes} minutes ahead")
+        
+        feature_df = pipeline.build_feature_set(args.exchange)
+        print(f"  Generated {len(feature_df)} feature rows")
+        
+        if args.output_format in ["csv", "both"]:
+            csv_path = pipeline.save_feature_set(feature_df, args.exchange)
+            print(f"  ✓ CSV saved: {csv_path}")
+        
+        if args.output_format in ["sqlite", "both"]:
+            db_path = pipeline.save_feature_set_sqlite(feature_df, args.exchange)
+            print(f"  ✓ SQLite saved: {db_path}")
+        
+        print(f"\n✅ Feature pipeline completed for {args.exchange}")
+        
+    finally:
+        pipeline.extractor.close()
 
