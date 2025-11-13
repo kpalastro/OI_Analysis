@@ -102,35 +102,67 @@ def initialize_database():
                 except Exception as exc:
                     logging.warning(f"Could not enable timescaledb extension: {exc}")
 
-                cursor.execute(
-                    """
-                    CREATE TABLE IF NOT EXISTS option_chain_snapshots (
-                        id BIGSERIAL PRIMARY KEY,
-                        timestamp TIMESTAMPTZ NOT NULL,
-                        exchange TEXT NOT NULL,
-                        strike DOUBLE PRECISION NOT NULL,
-                        option_type TEXT NOT NULL,
-                        symbol TEXT NOT NULL,
-                        oi BIGINT,
-                        ltp DOUBLE PRECISION,
-                        token BIGINT NOT NULL,
-                        underlying_price DOUBLE PRECISION,
-                        moneyness TEXT,
-                        pct_change_3m DOUBLE PRECISION,
-                        pct_change_5m DOUBLE PRECISION,
-                        pct_change_10m DOUBLE PRECISION,
-                        pct_change_15m DOUBLE PRECISION,
-                        pct_change_30m DOUBLE PRECISION,
-                        created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
-                    )
-                    """
-                )
-                try:
+                # Check if table exists
+                cursor.execute("""
+                    SELECT EXISTS (
+                        SELECT FROM information_schema.tables 
+                        WHERE table_schema = 'public' 
+                        AND table_name = 'option_chain_snapshots'
+                    ) as exists
+                """)
+                result = cursor.fetchone()
+                table_exists = result['exists'] if result else False
+                
+                if not table_exists:
                     cursor.execute(
-                        "SELECT create_hypertable('option_chain_snapshots','timestamp', if_not_exists => TRUE);"
+                        """
+                        CREATE TABLE option_chain_snapshots (
+                            id BIGSERIAL,
+                            timestamp TIMESTAMPTZ NOT NULL,
+                            exchange TEXT NOT NULL,
+                            strike DOUBLE PRECISION NOT NULL,
+                            option_type TEXT NOT NULL,
+                            symbol TEXT NOT NULL,
+                            oi BIGINT,
+                            ltp DOUBLE PRECISION,
+                            token BIGINT NOT NULL,
+                            underlying_price DOUBLE PRECISION,
+                            moneyness TEXT,
+                            pct_change_3m DOUBLE PRECISION,
+                            pct_change_5m DOUBLE PRECISION,
+                            pct_change_10m DOUBLE PRECISION,
+                            pct_change_15m DOUBLE PRECISION,
+                            pct_change_30m DOUBLE PRECISION,
+                            created_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (id, timestamp)
+                        )
+                        """
                     )
-                except Exception as exc:
-                    logging.debug(f"Hypertable creation skipped: {exc}")
+                    try:
+                        cursor.execute(
+                            "SELECT create_hypertable('option_chain_snapshots','timestamp', if_not_exists => TRUE);"
+                        )
+                        logging.info("✓ Created TimescaleDB hypertable: option_chain_snapshots")
+                    except Exception as exc:
+                        logging.debug(f"Hypertable creation skipped: {exc}")
+                else:
+                    # Table exists, check if hypertable
+                    cursor.execute("""
+                        SELECT EXISTS (
+                            SELECT FROM timescaledb_information.hypertables 
+                            WHERE hypertable_name = 'option_chain_snapshots'
+                        ) as exists
+                    """)
+                    result = cursor.fetchone()
+                    is_hypertable = result['exists'] if result else False
+                    if not is_hypertable:
+                        try:
+                            cursor.execute(
+                                "SELECT create_hypertable('option_chain_snapshots','timestamp', if_not_exists => TRUE);"
+                            )
+                            logging.info("✓ Converted to TimescaleDB hypertable: option_chain_snapshots")
+                        except Exception as exc:
+                            logging.debug(f"Hypertable conversion skipped: {exc}")
             else:
                 cursor.execute(
                     """

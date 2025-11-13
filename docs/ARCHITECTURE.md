@@ -1,6 +1,8 @@
 # BSE / NSE OI Tracker – System Architecture
 
-This document describes the end‑to‑end architecture of the OI Tracker project: how real‑time market data flows through the system, how it is persisted and transformed, and how it powers analytics, automation, and the web UI. It also documents the current SQLite schema.
+This document describes the end‑to‑end architecture of the OI Tracker project: how real‑time market data flows through the system, how it is persisted and transformed, and how it powers analytics, automation, and the web UI. It documents the database schema (SQLite and PostgreSQL/TimescaleDB) and system components.
+
+**Note:** For migrating from SQLite to PostgreSQL/TimescaleDB, see [MIGRATION_TO_POSTGRES.md](MIGRATION_TO_POSTGRES.md).
 
 ---
 
@@ -27,11 +29,13 @@ This document describes the end‑to‑end architecture of the OI Tracker projec
 └──────────────┬────────────────────────────────────────────────────────────┘
                │
                │  (persisted snapshots, metadata)
-       ┌───────▼────────────────┐
-       │  SQLite `oi_tracker.db`│
-       │  • option_chain_snapshots                                     │
-       │  • exchange_metadata                                         │
-       └──────────┬──────────────┘
+       ┌───────▼──────────────────────────────┐
+       │  Database (SQLite or PostgreSQL)     │
+       │  • option_chain_snapshots            │
+       │  • exchange_metadata                 │
+       │  • alpha_predictions                 │
+       │  (PostgreSQL: TimescaleDB hypertable)│
+       └──────────┬───────────────────────────┘
                   │
                   │  (DataExtractor, FeaturePipeline)
 ┌─────────────────▼──────────────────────┐
@@ -57,7 +61,7 @@ This document describes the end‑to‑end architecture of the OI Tracker projec
 
 Key capabilities:
 - **Real-time market visualization** for NIFTY (NSE) and SENSEX (BSE).
-- **SQLite persistence** with restart recovery and analytical backfills.
+- **Database persistence** with SQLite (default) or PostgreSQL/TimescaleDB (configurable via environment variables) with restart recovery and analytical backfills.
 - **ML pipelines** for baseline models, advanced alpha model (LightGBM/XGBoost) and walk-forward validation.
 - **Automated Alpha strategy** that generates paper-trade signals, recorded alongside manual trades.
 - **Socket.IO dashboard** with option-chain analytics, Greeks, PCR, delta metrics, and position tracking.
@@ -80,7 +84,11 @@ Key capabilities:
 
 3. **Persistence**
    - `database.save_option_chain_snapshot()` batches writes to `option_chain_snapshots`.
+   - Database backend is automatically selected based on environment variables:
+     - If `DB_HOST` is set: PostgreSQL/TimescaleDB is used (with hypertable for time-series optimization).
+     - Otherwise: SQLite is used (default, file-based).
    - `exchange_metadata` stores last update time, underlying price, ATM strike per exchange.
+   - `alpha_predictions` logs all Alpha model predictions and strategy actions for performance tracking.
    - Daily restart uses `load_today_snapshots` and `should_load_from_db` to recover state.
 
 4. **Model inference**
@@ -111,7 +119,7 @@ Key capabilities:
 | Layer | Module / Path | Responsibilities |
 |-------|---------------|------------------|
 | **Web & Control Plane** | `oi_tracker_web.py` | Flask app, login flow, websocket event loops, option-chain analytics, persistence, ML integration, paper trading, Socket.IO emission. |
-| **Data Persistence** | `database.py` | SQLite schema management, snapshot writes, metadata tracking, cleanup helpers. |
+| **Data Persistence** | `database.py` | Database schema management (SQLite/PostgreSQL), snapshot writes, metadata tracking, cleanup helpers, TimescaleDB hypertable creation. |
 | **ML Feature Engineering** | `ml_system/data/feature_pipeline.py` | Aggregations, lagged deltas, target labels, CLI & docs. |
 | **Model Training** | `ml_system/training/train_alpha_model.py` | Walk-forward validation, LightGBM/XGBoost, metrics, artifact persistence. |
 | **Model Serving** | `ml_system/serving/model_server.py`<br>`ml_system/serving/realtime_feature_builder.py` | FastAPI server (optional), cached artifact loader, realtime feature generation for inference. |
@@ -124,9 +132,15 @@ Key capabilities:
 
 ## 4. Database Schema
 
+The system supports both SQLite (default) and PostgreSQL/TimescaleDB (configured via environment variables). The schema is identical across both backends, with PostgreSQL/TimescaleDB providing additional time-series optimizations through hypertables.
+
+**Migration Guide:** See [MIGRATION_TO_POSTGRES.md](MIGRATION_TO_POSTGRES.md) for detailed migration instructions.
+
 ### 4.1 `option_chain_snapshots`
 
 Stores every 30-second snapshot of the watched option chain for both exchanges.
+
+**PostgreSQL/TimescaleDB:** This table is automatically converted to a hypertable for time-series optimization, enabling efficient compression, retention policies, and continuous aggregates.
 
 | Column | Type | Description |
 |--------|------|-------------|
@@ -162,11 +176,31 @@ Tracks latest heartbeat per exchange to support restart recovery and analytics.
 | `last_underlying_price` | REAL | Most recent underlying price. |
 | `updated_at` | TIMESTAMP | Automatic update time. |
 
+### 4.3 `alpha_predictions`
+
+Logs all Alpha model predictions and automated strategy actions for performance tracking and validation.
+
+| Column | Type | Description |
+|--------|------|-------------|
+| `id` | INTEGER/SERIAL PRIMARY KEY | Auto-increment row id. |
+| `timestamp` | TIMESTAMP | Prediction time (UTC-naive or WITH TIME ZONE). |
+| `exchange` | TEXT | `'NSE'` or `'BSE'`. |
+| `signal` | TEXT | `'Bullish'`, `'Neutral'`, or `'Bearish'`. |
+| `prediction_code` | INTEGER | Encoded prediction (0=Neutral, 1=Bullish, -1=Bearish). |
+| `confidence` | REAL | Model confidence (0.0–1.0). |
+| `prob_bullish`, `prob_neutral`, `prob_bearish` | REAL | Per-class probabilities. |
+| `underlying_price` | REAL | Underlying price at prediction time. |
+| `atm_strike` | REAL | ATM strike at prediction time. |
+| `selected_symbol` | TEXT | Option symbol selected for trading (if any). |
+| `action` | TEXT | Strategy action (`'OPEN'`, `'CLOSE'`, `'HOLD'`). |
+| `notes` | TEXT | Additional metadata. |
+| `created_at` | TIMESTAMP | Auto-set insertion timestamp. |
+
 ### Other helpers
 - `get_previous_close_price(exchange)` fetches previous trading-day underlying close (used for UI deltas).
 - `cleanup_old_data(days)` removes stale rows (default 30 days).
 - `get_database_stats()` surfaces record counts, file size, metadata (useful for health dashboards).
-- `alpha_predictions`: newly added table capturing per-loop alpha model predictions and strategy decisions (signal, confidence, per-class probabilities, optional action metadata) for offline validation and performance tracking.
+- `initialize_database()` creates schema and, for PostgreSQL, enables TimescaleDB extension and creates hypertables.
 
 ---
 

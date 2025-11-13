@@ -93,6 +93,41 @@ The interface will automatically:
 - Display real-time OI changes
 - Highlight significant changes based on thresholds
 
+## Database Configuration
+
+The application supports both **SQLite** (default) and **PostgreSQL/TimescaleDB** (configurable via environment variables).
+
+### SQLite (Default)
+
+No configuration needed. The application will automatically create `oi_tracker.db` in the current directory.
+
+### PostgreSQL/TimescaleDB
+
+To use PostgreSQL/TimescaleDB, set the following environment variables in your `.env` file:
+
+```env
+# Database Configuration
+DB_HOST=127.0.0.1
+DB_PORT=5432
+DB_DATABASE=oi_tracker
+DB_USER=root
+DB_PASSWORD=password
+```
+
+**Migration Guide:** See [docs/MIGRATION_TO_POSTGRES.md](docs/MIGRATION_TO_POSTGRES.md) for detailed migration instructions, including:
+- PostgreSQL/TimescaleDB setup
+- Extension installation and configuration
+- Data migration from SQLite
+- Performance optimizations
+- Troubleshooting
+
+**Benefits of PostgreSQL/TimescaleDB:**
+- Time-series optimizations (hypertables)
+- Compression for historical data
+- Retention policies
+- Continuous aggregates
+- Better performance for large datasets
+
 ## Configuration Options
 
 ### Update Frequency
@@ -131,6 +166,7 @@ OPTIONS_COUNT = 5  # Shows 5 ITM + ATM + 5 OTM strikes
 - `Flask-SocketIO`: WebSocket support for real-time updates
 - `kite_trade`: Alternative Zerodha connection (no API needed)
 - `KiteTicker`: WebSocket for real-time price data
+- `database.py`: Database abstraction (SQLite/PostgreSQL)
 
 ### Frontend
 - **Bootstrap 5**: Responsive layout
@@ -141,8 +177,17 @@ OPTIONS_COUNT = 5  # Shows 5 ITM + ATM + 5 OTM strikes
 ### Data Flow
 1. **Initialization**: Authenticate → Get enctoken → Connect WebSocket
 2. **Background Thread**: Continuously fetches OI data every 30 seconds
-3. **WebSocket Broadcast**: Pushes updates to all connected clients
-4. **Frontend Update**: JavaScript receives data and updates tables in real-time
+3. **Database Persistence**: Saves snapshots to SQLite or PostgreSQL/TimescaleDB
+4. **WebSocket Broadcast**: Pushes updates to all connected clients
+5. **Frontend Update**: JavaScript receives data and updates tables in real-time
+
+### Database
+- **SQLite** (default): File-based database, no configuration needed
+- **PostgreSQL/TimescaleDB** (optional): Time-series optimized database for production
+- **Schema**: `option_chain_snapshots`, `exchange_metadata`, `alpha_predictions`
+- **Migration**: See [docs/MIGRATION_TO_POSTGRES.md](docs/MIGRATION_TO_POSTGRES.md)
+
+For complete architecture documentation, see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
 ## API Endpoints
 
